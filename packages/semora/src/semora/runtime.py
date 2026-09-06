@@ -776,10 +776,30 @@ def _decode_parked(active: dict[str, Any]) -> list[tuple[ToolCallPart, dict[str,
 
 
 def _deferred_requests(active: dict[str, Any]) -> DeferredToolRequests:
-    requests = _DEFERRED_REQUESTS.validate_python(active["continuation"]["deferred"])
+    continuation = active["continuation"]
+    encoded = continuation.get("deferred")
+    if encoded is not None:
+        requests = _DEFERRED_REQUESTS.validate_python(encoded)
+    else:
+        entries = continuation["calls"]
+        approvals = [
+            ToolCallPart(
+                tool_name=entry["call"]["tool_name"],
+                args=entry["call"]["args"],
+                tool_call_id=entry["call"]["tool_call_id"],
+            )
+            for entry in entries
+        ]
+        requests = DeferredToolRequests(
+            approvals=approvals,
+            metadata={
+                call.tool_call_id: dict(entry["request"])
+                for call, entry in zip(approvals, entries, strict=True)
+            },
+        )
     actual = [call.tool_call_id for call in requests.approvals]
     expected = list(active["call_ids"])
-    if actual != expected or any(call_id not in requests.metadata for call_id in actual):
+    if requests.calls or actual != expected or set(requests.metadata) != set(actual):
         raise ValueError("stored deferred requests do not match the active suspension")
     return requests
 

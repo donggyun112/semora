@@ -1,7 +1,7 @@
 """Policy lands at a seam, a suspension parks the worker, resume re-decides under current rules."""
 
 import pytest
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
@@ -36,6 +36,37 @@ from semora.runtime import ACTIVE_SUSPENSION
 from semora_store import MemorySteps
 
 DEFERRED_REQUESTS = TypeAdapter(DeferredToolRequests)
+
+
+async def replace_active_suspension(
+    store: MemorySteps, branch_id: str, active: dict[str, object]
+) -> None:
+    owner = "continuation-fixture"
+    token = await store.acquire(branch_id, owner, 30)
+    assert token
+    try:
+        await store.write_control(branch_id, ACTIVE_SUSPENSION, active, token)
+    finally:
+        await store.release(branch_id, owner)
+
+
+async def rewrite_as_legacy_continuation(store: MemorySteps, branch_id: str) -> None:
+    record = await store.read(branch_id, ACTIVE_SUSPENSION)
+    active = dict(record.value)
+    continuation = dict(active["continuation"])
+    requests = DEFERRED_REQUESTS.validate_python(continuation.pop("deferred"))
+    continuation["calls"] = [
+        {
+            "call": {
+                "tool_name": call.tool_name,
+                "args": call.args_as_dict(),
+                "tool_call_id": call.tool_call_id,
+            },
+            "request": requests.metadata[call.tool_call_id],
+        }
+        for call in requests.approvals
+    ]
+    await replace_active_suspension(store, branch_id, {**active, "continuation": continuation})
 
 
 class Files:
@@ -156,6 +187,75 @@ async def test_resume_lets_pydantic_apply_approved_argument_overrides() -> None:
         controls=controls,
     )
     assert files.ran == ["reviewed.md"]
+
+
+async def test_resume_reads_a_legacy_0_5_continuation() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(files.write)
+    controls = ControlPlane(pre_tool_use=ask_for("stale.md"))
+    with pytest.raises(AgentSuspended) as parked:
+        await AgentRuntime(store).run("legacy", agent, "delete", controls=controls)
+
+    await rewrite_as_legacy_continuation(store, "legacy")
+    outcome = await AgentRuntime(store).resume(
+        "legacy",
+        parked.value.pending_id or "",
+        {"type": "approve"},
+        agent,
+        controls=controls,
+    )
+
+    assert outcome.output == "done"
+    assert files.ran == ["stale.md"]
+
+
+async def test_resume_rejects_mismatched_deferred_call_ids() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(files.write)
+    controls = ControlPlane(pre_tool_use=ask_for("stale.md"))
+    with pytest.raises(AgentSuspended) as parked:
+        await AgentRuntime(store).run("mismatch", agent, "delete", controls=controls)
+    record = await store.read("mismatch", ACTIVE_SUSPENSION)
+    active = {**record.value, "call_ids": ["different"]}
+    await replace_active_suspension(store, "mismatch", active)
+
+    with pytest.raises(ValueError, match="do not match"):
+        await AgentRuntime(store).resume(
+            "mismatch",
+            parked.value.pending_id or "",
+            {"type": "approve"},
+            agent,
+            controls=controls,
+        )
+    assert files.ran == []
+
+
+async def test_resume_rejects_a_malformed_native_deferred_value() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(files.write)
+    controls = ControlPlane(pre_tool_use=ask_for("stale.md"))
+    with pytest.raises(AgentSuspended) as parked:
+        await AgentRuntime(store).run("malformed", agent, "delete", controls=controls)
+    record = await store.read("malformed", ACTIVE_SUSPENSION)
+    active = dict(record.value)
+    active["continuation"] = {
+        **active["continuation"],
+        "deferred": {"approvals": "bad"},
+    }
+    await replace_active_suspension(store, "malformed", active)
+
+    with pytest.raises(ValidationError):
+        await AgentRuntime(store).resume(
+            "malformed",
+            parked.value.pending_id or "",
+            {"type": "approve"},
+            agent,
+            controls=controls,
+        )
+    assert files.ran == []
 
 
 async def test_a_suspension_survives_the_process_and_the_run_continues() -> None:
