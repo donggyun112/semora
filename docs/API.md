@@ -1,6 +1,6 @@
-# Semora 0.3 API
+# Semora API
 
-Semora extends Pydantic AI. Use native `ToolCallPart` and model messages throughout; 0.2 message dictionaries and positional runtime calls are not compatible. See [migration](MIGRATION-0.3.md).
+Semora extends Pydantic AI. Use its native `Agent`, `RunContext`, tool definitions, deferred results, and model messages throughout. See the [Pydantic-native migration](MIGRATION-PYDANTIC-NATIVE.md); applications migrating from 0.2 should also read the [0.3 migration](MIGRATION-0.3.md).
 
 ## Imports
 
@@ -18,6 +18,7 @@ from semora import (
     Ctx,
     Deny,
     Effects,
+    ExecutionBoundary,
     FinishPolicy,
     Halt,
     Ingress,
@@ -59,8 +60,8 @@ All methods below are async. `branch_id` accepts a string or `ExecutionContext`.
 | Method | Result and contract |
 |---|---|
 | `run(branch_id, agent, prompt=None, *, controls=None, rules_version="", prompt_id=None, conversation_id=None, message_history=None, deferred_tool_results=None, deps=None, capabilities=(), **options)` | `Outcome`; `agent` is a Pydantic AI agent. Extra model/run options reach Pydantic AI. Acquires and renews a run lease. |
-| `resume(branch_id, pending_id, answer, agent, *, controls=None, rules_version="", deps=None)` | Records an answer, then revalidates when all parked calls are answered. Unanswered siblings raise `AgentSuspended` again. Unknown pending IDs raise `LookupError`. |
-| `recover(branch_id, agent, history, *, controls=None, rules_version="", conversation_id=None, deps=None)` | Continues from native message history. Reuses committed effects; unreported effects raise `Indeterminate` unless retry was explicitly enabled. |
+| `resume(branch_id, pending_id, answer, agent, *, controls=None, rules_version="", deps=None, capabilities=(), **options)` | Records an answer, then revalidates when all parked calls are answered. Caller-supplied Pydantic capabilities and run options reach the resumed attempt. Unanswered siblings raise `AgentSuspended` again. Unknown pending IDs raise `LookupError`. |
+| `recover(branch_id, agent, history, *, controls=None, rules_version="", conversation_id=None, deps=None, capabilities=(), **options)` | Continues from native message history with caller-supplied Pydantic capabilities and run options. Reuses committed effects; unreported effects raise `Indeterminate` unless retry was explicitly enabled. |
 | `fork(source, at, target, agent, prompt=None, *, history=None, regate=False, controls=None, rules_version="", source_conversation_id=None, conversation_id=None, deps=None, **options)` | Starts `target` from `source`'s transcript at entry uuid `at` (`None`: the active tip), or from `history` when the host keeps its own coordinates. Effects the source finished in that history are copied to the new run's ledger and replay; `regate=True` asks the new run's `pre_tool_use` about each first, and only `Continue` replays. A call the source started and never reported is copied as started, so `retry_running` decides. The rest runs under the new run's policy. The source is never written. |
 | `committed_history(branch_id, conversation_id=None)` | `list[ModelMessage]`; requires a transcript. Supply this to `recover`. |
 | `submit(branch_id, item)` | Enqueues and returns a `PendingInput`; requires an execution store. |
@@ -70,6 +71,8 @@ All methods below are async. `branch_id` accepts a string or `ExecutionContext`.
 
 `interrupted` includes a still-running worker. Only acquiring the lease distinguishes it from a dead one.
 
+Each `run`, `resume`, or `recover` is a fresh Pydantic AI attempt. Reconstruct and pass security-sensitive capabilities on every entry from a replacement process. Semora deliberately persists data and decisions, never executable capability objects. `fork` and `dispatch` accept capabilities through their Pydantic `**options` passthrough.
+
 Approval updates and finalization hold the run lease; concurrent `resume` calls may raise `Contended` before accepting the answer, so the host should retry that answer. A prompt submitted through `run` while a fully answered continuation is resuming is enqueued before `Contended` is raised. Keep a stable `prompt_id` on retries to avoid enqueueing it twice.
 
 `Outcome` exposes `output`, `stop_reason`, optional native `result`, `pending`, `pending_id`, `suspended`, and `all_messages()`. A runtime-level park is raised as `AgentSuspended`, carrying `pending_id`, `tool_call_id` and ordered `pending` pairs. The class-agent interface below converts that signal to a suspended outcome, whose `all_messages()` is empty because no native completed result exists.
@@ -78,9 +81,9 @@ Use `{"type": "approve"}` for approval, `{"type": "approve", "args": {...}}` to 
 
 A refusal is not routed through `on_resume` and cannot be lifted there. It ends the round: the outcome's `stop_reason` is `"aborted"`, the refusal message is that call's recorded result, every call the same round approved still runs, and the model is not asked again — handed a refusal it would call the tool again and the same person would answer the same prompt, without bound. Calls in the round that nobody has answered yet keep the run parked; only the answer that completes the round ends it. A host that wants the model to see a rejection and try something else expresses that as a `Deny` from `pre_tool_use`, which is a policy verdict rather than a person's.
 
-## Optional class agent
+## Compatibility class agent
 
-Subclass `semora.Agent`; this is a Pydantic AI Agent subclass with run-bound convenience methods.
+Prefer a native `pydantic_ai.Agent` with `AgentRuntime`. `semora.Agent` remains a Pydantic AI Agent subclass with run-bound convenience methods for existing applications.
 
 | Class member | Meaning |
 |---|---|
@@ -98,9 +101,9 @@ Construct with `branch_id=None`, `runtime=None`, and supported configuration ove
 
 Instance fields are not automatically durable. Restore trusted tool configuration when constructing a replacement instance. Mutable class attributes are shared; do not put per-run working state there.
 
-## Control points
+## Compatibility control points
 
-`ControlPlane` accepts any subset of these async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, `subject`, and `tool`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
+Use Pydantic AI capabilities and hooks, or Harness guardrails, for general input, model, tool, and output policy. `ControlPlane` remains the compatibility API for Semora's durable permission, revalidation, journal, and suspension contracts. It accepts any subset of the existing async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, `subject`, and `tool`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
 
 `Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A call carries a name and arguments but never the tool's own declaration, so a permission class the host attached as tool metadata — `@tool(metadata={"permission": "read"})`, or `Tool(fn, metadata=...)` for an implementation written elsewhere — is read from `ctx.tool.metadata` and nowhere else.
 
@@ -122,7 +125,7 @@ Instance fields are not automatically durable. Restore trusted tool configuratio
 
 ## Effect and storage contract
 
-`Effects(store, branch_id, token=0, *, controls=None, retry_running=False, rules_version="", subject="", resumed=None, inputs=None, record=None)` is the capability the runtime installs per attempt. Prefer `AgentRuntime` so lease and continuation ownership stay centralized.
+`ExecutionBoundary(store, branch_id, token=0, *, controls=None, retry_running=False, rules_version="", subject="", resumed=None, inputs=None, record=None)` is the capability the runtime installs per attempt. `Effects` is a compatibility alias for the same class. Prefer `AgentRuntime` so lease and continuation ownership stay centralized.
 
 - `tool:{call_id}` stores the original effect result envelope. Ordinary tool exceptions produce committed error results. `ControlSignal`, ledger signals and cancellation propagate.
 - `after:{call_id}` stores the completed model-visible journal projection separately. Recovery reuses that projection without leaking the unredacted original. A journal can execute again if the process dies before committing its projection: external journal effects must be idempotent.
