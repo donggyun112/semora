@@ -43,7 +43,8 @@ from semora_store import (
 from .contracts import AgentSuspended, PendingInput, StopReason
 from .controls import Controls, Ctx
 from .dispatch import Command, default_router
-from .effects import PENDING_ROUND, ExecutionBoundary, Resumed, step_key
+from .effects import PENDING_ROUND, ExecutionBoundary, Resumed
+from .journal import step_key
 from .transcript import Branch, messages_at, messages_of
 
 __all__ = ["ACTIVE_SUSPENSION", "AgentRuntime", "Outcome", "unanswered_tool_calls"]

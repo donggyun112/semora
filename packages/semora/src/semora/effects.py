@@ -16,21 +16,14 @@ hook: `pre_tool_use` before the effect, `post_tool_use` after it and once per ca
 when an approved call comes back, and the three turn-level points around the graph's nodes.
 """
 
-import asyncio
-import hashlib
-import json
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from copy import deepcopy
 from dataclasses import replace
 from typing import Any, NamedTuple, Protocol
 
-from pydantic import TypeAdapter
 from pydantic_ai import CallToolsNode, DeferredToolRequests, ModelRequestNode, RunContext
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.exceptions import (
     ApprovalRequired,
-    CallDeferred,
-    ModelRetry,
     SkipToolExecution,
     ToolFailed,
 )
@@ -45,11 +38,10 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.result import FinalResult
 from pydantic_ai.tools import ToolDefinition
-from pydantic_core import to_jsonable_python
 from pydantic_graph import End
-from semora_store import Contended, ExecutionStore, Fenced, Indeterminate, Step
+from semora_store import ExecutionStore
 
-from .contracts import ControlSignal, PendingInput, StopReason
+from .contracts import PendingInput, StopReason
 from .controls import (
     Continue,
     Controls,
@@ -61,7 +53,7 @@ from .controls import (
     Suspend,
     ToolDecision,
 )
-from .transcript import stripped
+from .journal import EffectJournal, after_key, model_step_key, step_key
 
 __all__ = [
     "CONCURRENCY_SAFE",
@@ -90,39 +82,6 @@ NOT_EXECUTED = (
     "not executed: an earlier call in this round awaits approval; reissue it once that is decided"
 )
 """Model-visible stand-in for a call behind a suspension. The effect did not happen."""
-
-_NOTHING_HAPPENED = (ApprovalRequired, CallDeferred, ModelRetry)
-"""Signals a tool raises before any side effect. Intent is cleared so the call can rerun."""
-
-_RUNTIME_SIGNALS = (ControlSignal, Indeterminate, Fenced, Contended)
-"""Ledger signals. Never converted into a tool result."""
-
-_RESPONSE = TypeAdapter(ModelResponse)
-
-
-def step_key(call_id: str) -> str:
-    """Name the durable step for one tool call."""
-    return f"tool:{call_id}"
-
-
-def after_key(call_id: str) -> str:
-    """Name the marker that says `post_tool_use` already crossed its boundary for one call."""
-    return f"after:{call_id}"
-
-
-def model_step_key(request: ModelRequestContext) -> str:
-    """Derive one model effect id from its model, tools, and model-visible context."""
-    model = request.model_id or getattr(request.model, "model_id", None) or repr(request.model)
-    body = {
-        "model": model,
-        "tools": [
-            [tool.name, tool.description, tool.parameters_json_schema]
-            for tool in request.model_request_parameters.function_tools
-        ],
-        "messages": stripped(to_jsonable_python(request.messages)),
-    }
-    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return f"agent:model:{hashlib.sha256(canonical.encode()).hexdigest()[:32]}"
 
 
 def represented_inputs(messages: list[ModelMessage]) -> set[str]:
@@ -219,6 +178,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
         self.record = record
         self.regate = set(regate)
         self.cancelled = cancelled
+        self.journal = EffectJournal(store, branch_id, token, retry_running=retry_running)
         self.calls_made: list[dict[str, Any]] = []
         self.stop_reason: StopReason | None = None
         self.turn = 0
@@ -381,38 +341,8 @@ class ExecutionBoundary(AbstractCapability[Any]):
         request_context: ModelRequestContext,
         handler: Callable[[ModelRequestContext], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        """Execute or replay one model request as a durable step.
-
-        A request that raised is known not to have exposed output, so its intent is cleared. One
-        that was interrupted stays `running`, and the next attempt refuses to guess rather than
-        risk a duplicate charge and a different answer.
-        """
-        if self.store is None:
-            return await handler(request_context)
-        key = model_step_key(request_context)
-        step = await self.store.read(self.branch_id, key)
-        if step.status == "done":
-            return _RESPONSE.validate_python(step.value["response"])
-        if step.status == "running":
-            if not self.retry_running:
-                raise Indeterminate(self.branch_id, key)
-            await self.store.forget(self.branch_id, key, self.token)
-        if not await self.store.start(self.branch_id, key, self.token):
-            raise Indeterminate(self.branch_id, key)
-        try:
-            response = await handler(request_context)
-        except asyncio.CancelledError:
-            raise  # a cancellation is a crash, not the step's report about itself
-        except BaseException:
-            await self.store.forget(self.branch_id, key, self.token)
-            raise
-        await self.store.finish_effect(
-            self.branch_id,
-            key,
-            {"type": "model_result", "response": to_jsonable_python(response)},
-            self.token,
-        )
-        return response
+        """Execute or replay one model request through the durable journal."""
+        return await self.journal.model(request_context, handler)
 
     # ── the tool boundary ─────────────────────────────────────────────────────
 
@@ -427,7 +357,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
         """Ask the gate. A denial is a result the model sees; a suspension parks first."""
         here = self._ctx(ctx, tool=tool_def)
         decision: ToolDecision
-        if call.tool_call_id not in self.regate and await self._recorded(call):
+        if call.tool_call_id not in self.regate and await self.journal.recorded(call.tool_call_id):
             # The effect happened. No gate can undo it, and asking a person to approve it would
             # be asking about the past: the record replays and only the journal sees it. A fork
             # that wants the new policy's verdict on a copied record says so with `regate`.
@@ -467,12 +397,6 @@ class ExecutionBoundary(AbstractCapability[Any]):
             return Deny(NOT_EXECUTED)
         return decision
 
-    async def _recorded(self, call: ToolCallPart) -> bool:
-        """Whether this run's ledger already holds the call's finished effect."""
-        if self.store is None:
-            return False
-        return (await self.store.read(self.branch_id, step_key(call.tool_call_id))).status == "done"
-
     async def _resume_decision(self, here: Ctx, call: ToolCallPart) -> ToolDecision:
         """Ask `on_resume` about an approved call that still has to run."""
         resumed = self.resumed.get(call.tool_call_id)
@@ -494,79 +418,23 @@ class ExecutionBoundary(AbstractCapability[Any]):
         handler: Callable[[Any], Awaitable[Any]],
     ) -> Any:
         """Answer from the record, refuse to guess, or run the tool once. Then journal once."""
-        if self.store is None:
-            step = await self._execute(None, args, handler)
-        else:
-            key = step_key(call.tool_call_id)
-            step = await self.store.read(self.branch_id, key)
-            if step.status == "running":
-                if not self.retry_running:
-                    raise Indeterminate(self.branch_id, key)
-                await self.store.forget(self.branch_id, key, self.token)
-                step = Step("absent")
-            if step.status == "absent":
-                if not await self.store.start(self.branch_id, key, self.token):
-                    raise Indeterminate(self.branch_id, key)
-                step = await self._execute(key, args, handler)
-        record = await self._journal_once(ctx, call, tool_def, step.value)
+        record = await self.journal.tool(call.tool_call_id, args, handler)
+
+        async def project(committed: dict[str, Any]) -> None:
+            assert self.controls is not None
+            result = (
+                committed["value"]
+                if committed["ok"]
+                else {"type": "error", "message": committed["error"]}
+            )
+            await self.controls.post_tool_use(self._ctx(ctx, tool=tool_def), call, result)
+
+        record = await self.journal.project_once(
+            call.tool_call_id, record, project if self.controls is not None else None
+        )
         if record["ok"]:
             return record["value"]
         raise ToolFailed(record["error"])
-
-    async def _execute(
-        self, key: str | None, args: Any, handler: Callable[[Any], Awaitable[Any]]
-    ) -> Step:
-        try:
-            value = await handler(args)
-        except _NOTHING_HAPPENED:
-            if self.store is not None and key is not None:
-                await self.store.forget(self.branch_id, key, self.token)
-            raise
-        except _RUNTIME_SIGNALS:
-            raise
-        except Exception as error:  # the one catch boundary
-            record: dict[str, Any] = {"ok": False, "error": str(error)}
-        else:
-            record = {"ok": True, "value": value}
-        # A cancellation between `handler` and here leaves the step `running`, which is the truth.
-        if self.store is not None and key is not None:
-            await self.store.finish_effect(self.branch_id, key, record, self.token)
-        return Step("done", record)
-
-    async def _journal_once(
-        self,
-        ctx: RunContext[Any],
-        call: ToolCallPart,
-        tool_def: ToolDefinition,
-        record: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Replay the model-visible projection, or journal a copy of the effect result.
-
-        Every crash between the hook and its marker re-runs the hook, so exactly-once still
-        requires the hook itself to be idempotent per call id.
-        """
-        key = after_key(call.tool_call_id)
-        if self.store is not None:
-            journal = await self.store.read(self.branch_id, key)
-            if journal.status == "done":
-                projection = journal.value.get("record")
-                if not isinstance(projection, dict):
-                    raise ValueError("journal completion has no recorded model-visible result")
-                return deepcopy(projection)
-        if self.controls is None:
-            return record
-        projected = deepcopy(record)
-        result = (
-            projected["value"]
-            if projected["ok"]
-            else {"type": "error", "message": projected["error"]}
-        )
-        await self.controls.post_tool_use(self._ctx(ctx, tool=tool_def), call, result)
-        if self.store is not None:
-            await self.store.write_control(
-                self.branch_id, key, {"hooked": True, "record": projected}, self.token
-            )
-        return projected
 
     # ── context ───────────────────────────────────────────────────────────────
 

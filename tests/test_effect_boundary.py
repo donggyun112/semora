@@ -24,8 +24,10 @@ from semora import (
     Effects,
     ExecutionBoundary,
     Halt,
+    Indeterminate,
     MemorySteps,
 )
+from semora.journal import EffectJournal, step_key
 
 
 def history() -> list[ModelMessage]:
@@ -37,6 +39,84 @@ def history() -> list[ModelMessage]:
 
 def answer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     return ModelResponse(parts=[TextPart("done")])
+
+
+async def test_effect_journal_replays_a_committed_tool_without_running_the_body() -> None:
+    store = MemorySteps()
+    token = await store.acquire("journal-replay", "test", 30)
+    assert token
+    journal = EffectJournal(store, "journal-replay", token, retry_running=False)
+    calls = 0
+
+    async def body(args: object) -> str:
+        nonlocal calls
+        calls += 1
+        return f"value:{args}"
+
+    try:
+        first = await journal.tool("c1", "one", body)
+        second = await journal.tool("c1", "two", body)
+    finally:
+        await store.release("journal-replay", "test")
+
+    assert first == second == {"ok": True, "value": "value:one"}
+    assert calls == 1
+
+
+async def test_effect_journal_refuses_an_unresolved_started_tool() -> None:
+    store = MemorySteps()
+    token = await store.acquire("journal-running", "test", 30)
+    assert token
+    assert await store.start("journal-running", step_key("c1"), token)
+    journal = EffectJournal(store, "journal-running", token, retry_running=False)
+
+    async def body(args: object) -> object:
+        return args
+
+    try:
+        with pytest.raises(Indeterminate):
+            await journal.tool("c1", "value", body)
+    finally:
+        await store.release("journal-running", "test")
+
+
+async def test_effect_journal_commits_a_failure_as_a_result() -> None:
+    store = MemorySteps()
+    token = await store.acquire("journal-failure", "test", 30)
+    assert token
+    journal = EffectJournal(store, "journal-failure", token, retry_running=False)
+
+    async def body(args: object) -> object:
+        raise ValueError(f"bad {args}")
+
+    try:
+        record = await journal.tool("c1", "input", body)
+    finally:
+        await store.release("journal-failure", "test")
+
+    assert record == {"ok": False, "error": "bad input"}
+    assert (await store.read("journal-failure", step_key("c1"))).status == "done"
+
+
+async def test_effect_journal_replays_one_post_tool_projection() -> None:
+    store = MemorySteps()
+    token = await store.acquire("journal-project", "test", 30)
+    assert token
+    journal = EffectJournal(store, "journal-project", token, retry_running=False)
+    projected: list[dict[str, Any]] = []
+
+    async def project(record: dict[str, Any]) -> None:
+        projected.append(dict(record))
+
+    committed = {"ok": True, "value": "done"}
+    try:
+        first = await journal.project_once("c1", committed, project)
+        second = await journal.project_once("c1", committed, project)
+    finally:
+        await store.release("journal-project", "test")
+
+    assert first == second == committed
+    assert projected == [committed]
 
 
 async def test_runtime_signal_leaves_an_unreported_effect() -> None:
