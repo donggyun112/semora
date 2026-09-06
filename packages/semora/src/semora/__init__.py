@@ -39,7 +39,7 @@ from .effects import CONCURRENCY_SAFE, Effects
 from .ids import new_branch_id
 from .runtime import AgentRuntime, Outcome
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 __all__ = [
     "CONCURRENCY_SAFE",
