@@ -1,6 +1,6 @@
 # Pydantic AI durability integration design
 
-**Status:** proposed
+**Status:** approved
 
 ## Context
 
