@@ -3,7 +3,7 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
-## Unreleased
+## 0.6.0 — 2026-09-07
 
 - **Pydantic AI's agent interface is now the only agent interface.** `semora.Agent`, `semora.tool`,
   class-body tool discovery, implicit branch binding, and implicit policy discovery were removed.
