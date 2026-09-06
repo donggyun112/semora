@@ -138,9 +138,7 @@ async def demo() -> None:
 
     first_runtime = AgentRuntime(store, transcript=transcript, retry_running=True)
     first_deps = ReviewerDeps(Path("."), [], asyncio.Event())
-    worker = asyncio.create_task(
-        drive("review-1", agent, first_runtime, first_deps, controls)
-    )
+    worker = asyncio.create_task(drive("review-1", agent, first_runtime, first_deps, controls))
     while (await store.read("review-1", "tool:c1")).status != "running":
         await asyncio.sleep(0)
     worker.cancel()

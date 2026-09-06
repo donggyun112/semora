@@ -21,9 +21,11 @@ agent = Agent(
     instructions="한국어로 간단하게 답하세요.",
 )
 
+
 async def main():
     result = await agent.run("인사해 줘")
     print(result.output)  # 안녕하세요!
+
 
 asyncio.run(main())
 ```
@@ -91,24 +93,29 @@ from dataclasses import dataclass
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.test import TestModel
 
+
 @dataclass
 class Deps:
     user_name: str
+
 
 agent = Agent(
     TestModel(call_tools=["service_name", "current_user"]),
     deps_type=Deps,
 )
 
+
 @agent.tool_plain
 def service_name() -> str:
     """서비스 이름을 반환한다."""
     return "Semora 학습실"
 
+
 @agent.tool
 def current_user(ctx: RunContext[Deps]) -> str:
     """현재 사용자 이름을 반환한다."""
     return ctx.deps.user_name
+
 
 async def main():
     result = await agent.run(
@@ -116,6 +123,7 @@ async def main():
         deps=Deps(user_name="민수"),
     )
     print(result.output)
+
 
 asyncio.run(main())
 ```
@@ -159,9 +167,9 @@ def greet(ctx: RunContext[Deps], greeting: str) -> str:
 
 ## 6. 여기까지 이해했으면 Semora로 넘어가기
 
-이 문서의 import는 `from pydantic_ai import Agent`다.
-[Semora의 permissions.py](../examples/permissions.py)는 `from semora import Agent`를 사용한다.
-Semora의 클래스 기반 인터페이스까지 모든 사용법이 같다고 생각하지는 말자.
+이 문서와 [Semora의 permissions.py](../examples/permissions.py)는 모두
+`from pydantic_ai import Agent`를 사용한다. Semora는 별도의 Agent 클래스를 제공하지 않고,
+네이티브 Agent를 `AgentRuntime` 안에서 실행한다.
 
 다음 예제에서는 한 가지 질문만 따라가면 된다.
 

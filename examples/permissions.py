@@ -54,9 +54,7 @@ def scripted(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             parts=[
                 ToolCallPart("read", {"path": "a.py"}, tool_call_id="c1"),
                 ToolCallPart("grep", {"pattern": "TODO"}, tool_call_id="c2"),
-                ToolCallPart(
-                    "write", {"path": "a.py", "text": "x"}, tool_call_id="c3"
-                ),
+                ToolCallPart("write", {"path": "a.py", "text": "x"}, tool_call_id="c3"),
             ]
         )
     return ModelResponse(parts=[TextPart("done")])

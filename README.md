@@ -2,7 +2,7 @@
 
 Fail-closed effect recovery and worker coordination for **Pydantic AI agents**.
 
-Pydantic AI owns the agent loop, messages, models, tools, deferred calls, and general lifecycle hooks. Semora adds a result-bearing effect ledger, worker leases and fencing, durable approval suspension, and policy revalidation on resume. Use an ordinary Pydantic AI agent; Semora's class-based agent remains as a compatibility convenience.
+Pydantic AI owns the agent loop, messages, models, tools, deferred calls, and general lifecycle hooks. Semora adds a result-bearing effect ledger, worker leases and fencing, durable approval suspension, and policy revalidation on resume. Applications use Pydantic AI's `Agent` directly.
 
 **Why not durable execution alone?** Pydantic AI and Harness already provide durable backends, snapshots, deferred tools, hooks, and guardrails. Semora keeps the narrower contract they do not enforce: a tool call that started and never committed its result stays `Indeterminate` until the caller says a retry is safe, and a person's approval is input to a fresh policy decision. The ledger is a protocol, so a Pydantic durable backend can still sit underneath it.
 
@@ -59,7 +59,7 @@ The [operator console](https://github.com/donggyun112/semora-console) demonstrat
 
 | Distribution | Import | Responsibility |
 |---|---|---|
-| `semora` | `semora` | Execution boundary, compatibility controls, runtime, transcript and dispatch |
+| `semora` | `semora` | Execution boundary, durable controls, runtime, transcript and dispatch |
 | `semora-store` | `semora_store` | Storage protocols and in-memory implementations; no dependencies |
 | `semora-store-pg` | `semora_store_pg` | PostgreSQL adapters |
 

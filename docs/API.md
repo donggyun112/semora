@@ -5,10 +5,9 @@ Semora extends Pydantic AI. Use its native `Agent`, `RunContext`, tool definitio
 ## Imports
 
 ```python
-from pydantic_ai import Agent as PydanticAgent
+from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 from semora import (
-    Agent,
     AgentRuntime,
     AgentSuspended,
     Answer,
@@ -37,7 +36,6 @@ from semora import (
     Suspending,
     gate,
     new_branch_id,
-    tool,
     writer,
 )
 from semora_store import (
@@ -59,7 +57,7 @@ All methods below are async. `branch_id` accepts a string or `ExecutionContext`.
 
 | Method | Result and contract |
 |---|---|
-| `run(branch_id, agent, prompt=None, *, controls=None, rules_version="", prompt_id=None, conversation_id=None, message_history=None, deferred_tool_results=None, deps=None, capabilities=(), **options)` | `Outcome`; `agent` is a Pydantic AI agent. Extra model/run options reach Pydantic AI. Acquires and renews a run lease. |
+| `run(branch_id, agent, prompt=None, *, controls=None, rules_version="", prompt_id=None, conversation_id=None, message_history=None, deferred_tool_results=None, deps=None, capabilities=(), **options)` | `Outcome`; `agent` implements Pydantic AI's public `AbstractAgent` interface. Extra model/run options reach that agent. Acquires and renews a run lease. |
 | `resume(branch_id, pending_id, answer, agent, *, controls=None, rules_version="", deps=None, capabilities=(), **options)` | Records an answer, then revalidates when all parked calls are answered. Caller-supplied Pydantic capabilities and run options reach the resumed attempt. Unanswered siblings raise `AgentSuspended` again. Unknown pending IDs raise `LookupError`. |
 | `recover(branch_id, agent, history, *, controls=None, rules_version="", conversation_id=None, deps=None, capabilities=(), **options)` | Continues from native message history with caller-supplied Pydantic capabilities and run options. Reuses committed effects; unreported effects raise `Indeterminate` unless retry was explicitly enabled. |
 | `fork(source, at, target, agent, prompt=None, *, history=None, regate=False, controls=None, rules_version="", source_conversation_id=None, conversation_id=None, deps=None, **options)` | Starts `target` from `source`'s transcript at entry uuid `at` (`None`: the active tip), or from `history` when the host keeps its own coordinates. Effects the source finished in that history are copied to the new run's ledger and replay; `regate=True` asks the new run's `pre_tool_use` about each first, and only `Continue` replays. A call the source started and never reported is copied as started, so `retry_running` decides. The rest runs under the new run's policy. The source is never written. |
@@ -75,37 +73,17 @@ Each `run`, `resume`, or `recover` is a fresh Pydantic AI attempt. Reconstruct a
 
 Approval updates and finalization hold the run lease; concurrent `resume` calls may raise `Contended` before accepting the answer, so the host should retry that answer. A prompt submitted through `run` while a fully answered continuation is resuming is enqueued before `Contended` is raised. Keep a stable `prompt_id` on retries to avoid enqueueing it twice.
 
-`Outcome` exposes `output`, `stop_reason`, optional native `result`, `pending`, `pending_id`, `suspended`, and `all_messages()`. A runtime-level park is raised as `AgentSuspended`, carrying `pending_id`, `tool_call_id` and ordered `pending` pairs. The class-agent interface below converts that signal to a suspended outcome, whose `all_messages()` is empty because no native completed result exists.
+`Outcome` exposes `output`, `stop_reason`, optional native `result`, `pending`, `pending_id`, `suspended`, and `all_messages()`. A runtime-level park is raised as `AgentSuspended`, carrying `pending_id`, `tool_call_id` and ordered `pending` pairs.
 
 Use `{"type": "approve"}` for approval, `{"type": "approve", "args": {...}}` to approve with replaced arguments, and `{"type": "error", "message": "declined"}` for refusal. Replaced arguments are validated by Pydantic AI and are what `on_resume` sees as the call; the original request stays in `ResumeInput.request`. Policy-version strings are host-provided labels.
 
 A refusal is not routed through `on_resume` and cannot be lifted there. It ends the round: the outcome's `stop_reason` is `"aborted"`, the refusal message is that call's recorded result, every call the same round approved still runs, and the model is not asked again — handed a refusal it would call the tool again and the same person would answer the same prompt, without bound. Calls in the round that nobody has answered yet keep the run parked; only the answer that completes the round ends it. A host that wants the model to see a rejection and try something else expresses that as a `Deny` from `pre_tool_use`, which is a policy verdict rather than a person's.
 
-## Compatibility class agent
+## Durable control points
 
-Prefer a native `pydantic_ai.Agent` with `AgentRuntime`. `semora.Agent` remains a Pydantic AI Agent subclass with run-bound convenience methods for existing applications.
+Use Pydantic AI capabilities and hooks, or Harness guardrails, for general input, model, tool, and output policy. `ControlPlane` carries the permission, revalidation, journal, and suspension decisions that participate in Semora's durable contract. It accepts any subset of the existing async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, `subject`, and `tool`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
 
-| Class member | Meaning |
-|---|---|
-| `llm` | Pydantic AI model instance or model name |
-| `prompt` | Instructions string or instance method rendering instructions |
-| `output` | Pydantic AI output type |
-| `uses` | Functions, native tools, toolsets, or capabilities |
-| `@tool` | Expose an instance method as a tool |
-| `store`, `transcript` | Shared instance or a factory resolved once per subclass |
-| Seven control-point methods | Default policies, overridden by an explicit controls object |
-
-`@tool` also accepts `concurrency_safe=False`, `requires_approval=False`, `name=None`, `description=None`, `metadata=None`, `timeout=None`, `strict=None`, and `defer_loading=False`. `metadata` is the host's own declaration about the tool, reaching `ctx.tool.metadata` at the tool control points; `concurrency_safe=True` writes `CONCURRENCY_SAFE` into the same mapping, so a host key must not use that name. `timeout`, `strict` and `defer_loading` are Pydantic AI's own tool settings, forwarded untouched — Semora imposes no timeout of its own, so a tool that must not run forever says so here. A `requires_approval=True` tool parks through the `pre_tool_use` gate like a `Suspend`, with the call's `tool_call_id` as its `pending_id`; a gate's `Deny` still wins, and `on_resume` re-decides the answer.
-
-Construct with `branch_id=None`, `runtime=None`, and supported configuration overrides. An instance binds to one branch; changing its id or overlapping attempts raises `RuntimeError`. `run(prompt=None, ...)` mints a branch id if needed. `resume(answer, pending_id=None, ...)` defaults to the first pending request. `recover(history=None, ...)` loads committed history when omitted. `fork(source, at=None, prompt=None, *, history=None, regate=False, ...)` makes this instance's branch a fork of another. `dispatch(command, ...)`, `submit(item, ...)`, `state()` and `pending()` operate on that instance's branch. `last` holds the last outcome. Pydantic AI's `run_sync(prompt, run_id=...)` is inherited unchanged: its `run_id` is the loop's, so bind the branch in the constructor.
-
-Instance fields are not automatically durable. Restore trusted tool configuration when constructing a replacement instance. Mutable class attributes are shared; do not put per-run working state there.
-
-## Compatibility control points
-
-Use Pydantic AI capabilities and hooks, or Harness guardrails, for general input, model, tool, and output policy. `ControlPlane` remains the compatibility API for Semora's durable permission, revalidation, journal, and suspension contracts. It accepts any subset of the existing async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, `subject`, and `tool`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
-
-`Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A call carries a name and arguments but never the tool's own declaration, so a permission class the host attached as tool metadata — `@tool(metadata={"permission": "read"})`, or `Tool(fn, metadata=...)` for an implementation written elsewhere — is read from `ctx.tool.metadata` and nowhere else.
+`Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A call carries a name and arguments but never the tool's own declaration, so a permission class the host attached with Pydantic AI's `Tool(fn, metadata={"permission": "read"})` is read from `ctx.tool.metadata` and nowhere else.
 
 `Ctx.run` is Pydantic AI's own `RunContext`, present at every control point the agent loop reaches and `None` only at `on_suspend`. The other fields are lifted out of it for the common case; this is the rest — `deps`, `usage`, `retries`, `tool_call_approved`, the tool manager — and it is what native helpers take, so a gate selects tools with `matches_tool_selector(selector, ctx.run, ctx.tool)` rather than a matching rule of its own. `ctx.run.tool_call_metadata` is not the parked request: Pydantic AI fills it on its inline deferred-handler path, which a durable park does not take. Read the request from `ResumeInput.request`.
 

@@ -48,15 +48,12 @@ Semora의 승인 보류는 필요한 상태를 저장소에 보관하고 **현�
 현재 구현의 보관 구조는 [runtime.py](../../packages/semora/src/semora/runtime.py)의 `_park`에서 볼 수 있다.
 실제 프로세스 재시작을 견디려면 이 기록을 보존하는 저장소가 필요하다. `MemorySteps`는 학습용이다.
 
-## API에서 보류를 받는 두 방식
+## API에서 보류를 받는 방식
 
-| 인터페이스 | 보류를 알리는 방식 |
-|---|---|
-| `AgentRuntime.run(...)` | `AgentSuspended` 예외 |
-| `semora.Agent` 인스턴스의 `run(...)` | `suspended=True`인 `Outcome` |
-
-`permissions.py`에서 예외 처리 없이 `parked.suspended`를 검사하는 이유는 두 번째 인터페이스를 사용하기 때문이다.
-같은 보류를 표현하는 모양이 다르다. 계약은 [API 문서](../API.md#runtime)에 있다.
+`AgentRuntime.run(...)`은 실행을 내구성 있게 보류하면 `AgentSuspended`를 발생시킨다.
+호스트는 예외가 가진 `pending_id`를 승인 UI나 작업 큐에 연결하고, 답이 오면
+`AgentRuntime.resume(...)`에 그 ID와 답을 전달한다. 실제 흐름은
+[permissions.py](../../examples/permissions.py)의 `try`/`except`에서 볼 수 있다.
 
 ## “승인했으면 실행”으로 끝나지 않는 이유
 

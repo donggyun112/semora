@@ -19,23 +19,22 @@ import asyncio
 
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
-    ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart,
+    ModelMessage,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 
 def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     returned = [
-        part
-        for message in messages
-        for part in message.parts
-        if isinstance(part, ToolReturnPart)
+        part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)
     ]
     if returned:
         return ModelResponse(parts=[TextPart(f"읽은 내용: {returned[-1].content}")])
-    return ModelResponse(parts=[
-        ToolCallPart("read", {"path": "memo.txt"}, tool_call_id="read-1")
-    ])
+    return ModelResponse(parts=[ToolCallPart("read", {"path": "memo.txt"}, tool_call_id="read-1")])
 
 
 agent = Agent(FunctionModel(model))

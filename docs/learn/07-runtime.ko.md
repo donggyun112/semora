@@ -13,7 +13,6 @@
 | `runtime.py` | 어느 작업을 누가 실행하고, 어떻게 보류·재개·복구하는가? |
 | `transcript.py` | 대화와 실행 정보를 어떻게 보관하고 복원하는가? |
 | `dispatch.py` | 외부 명령을 현재 실행 상태에 어떻게 연결하는가? |
-| `agent.py` | 클래스 기반 사용법을 어떻게 제공하는가? |
 | `semora-store` | 저장소가 지켜야 할 인터페이스와 메모리 구현 |
 | `semora-store-pg` | PostgreSQL 저장소 구현 |
 
@@ -112,18 +111,13 @@ lease, fencing, 외부 중복 제거는 서로 다른 문제를 담당한다.
 `_attempt` 안에는 다음과 같은 형태의 코드가 있다. 부분 코드다.
 
 ```python
-from pydantic_ai import Agent
-
 # _attempt 내부의 핵심 형태:
-# result = await Agent.run(agent, ..., capabilities=[effects, ...])
+# result = await agent.run(..., capabilities=[effects, ...])
 ```
 
-여기서 `Agent`는 import가 보여 주듯 Pydantic AI의 클래스다.
-Semora는 `Effects`를 capability로 붙이고 Pydantic AI의 실행 기능을 사용한다.
+여기서 `agent`는 Pydantic AI의 공개 `AbstractAgent` 인터페이스를 구현한다.
+Semora는 `ExecutionBoundary`를 capability로 붙이고 그 에이전트의 공개 `run()`을 사용한다.
 `capability`는 이 단계에서는 “프레임워크가 제공한 실행 지점에 기능을 붙이는 객체” 정도로 이해하면 된다.
-
-Semora의 클래스 Agent도 이 경로를 사용한다. `_attempt`에서 기본 클래스의 메서드를 명시하는 이유는 Semora의 `run` 편의 메서드로 다시 진입하는 것을 피하기 위해서다.
-이 역할 분담은 [프로젝트 계약](../../AGENTS.md)과 소스 주석에 명시되어 있다.
 
 ## effects.py에서 처음 읽을 곳
 

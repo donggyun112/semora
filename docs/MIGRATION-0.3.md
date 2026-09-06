@@ -1,5 +1,9 @@
 # Migrating to Semora 0.3
 
+> This document describes the historical 0.3 API. The later Pydantic-native cleanup removed
+> `semora.Agent` and `semora.tool`; follow [the current migration guide](MIGRATION-PYDANTIC-NATIVE.md)
+> after applying the message and storage changes below.
+
 Semora now extends Pydantic AI. The independently developed `pydantic-ai-runtime` port is the source of this successor, not a second maintained product.
 
 ## Preserved implementation

@@ -372,4 +372,3 @@ class ControlPlane:
         """Persist a suspension through the configured control."""
         if self._on_suspend is not None:
             await self._on_suspend(ctx, call, request, snapshot, completed)
-

@@ -3,6 +3,15 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
+## Unreleased
+
+- **Pydantic AI's agent interface is now the only agent interface.** `semora.Agent`, `semora.tool`,
+  class-body tool discovery, implicit branch binding, and implicit policy discovery were removed.
+  Construct `pydantic_ai.Agent` and `pydantic_ai.Tool` directly, then pass the agent and an explicit
+  `ControlPlane` to `AgentRuntime`.
+- `AgentRuntime` accepts Pydantic AI's public `AbstractAgent` interface and calls its public
+  `run()` method, so upstream `WrapperAgent` and Harness behavior is preserved.
+
 ## 0.5.0 — 2026-09-06
 
 - **A person's refusal ends the round instead of going back to the model.** Answering `{"type": "error", ...}` used to reach the model as that call's result, and a model that read it could call the tool again — parking the round again, and asking the same person the same question, without bound. The refusal is still the call's recorded result and every call the same round approved still runs; what no longer happens is the model request that would carry it. The outcome's `stop_reason` is `"aborted"`, the enum member that had been reserved and never produced. Calls nobody has answered keep the run parked, so a refusal in a batch never decides for the answers still outstanding. A rejection the model *should* see and route around is a `Deny` from `pre_tool_use` — a policy verdict, which is what `Deny` is for.

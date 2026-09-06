@@ -9,7 +9,7 @@ from semora import Effects, ExecutionBoundary
 assert Effects is ExecutionBoundary
 ```
 
-## Prefer the native agent
+## Use the native agent
 
 Applications should construct `pydantic_ai.Agent` directly and let `AgentRuntime` attach Semora's
 boundary for each attempt:
@@ -23,8 +23,27 @@ runtime = AgentRuntime(store, transcript=transcript)
 outcome = await runtime.run("branch-1", agent, "update the file")
 ```
 
-The optional `semora.Agent` subclass still works. It is a compatibility convenience rather than
-the primary API and should not be used as a place to mirror new Pydantic AI features.
+The former `semora.Agent` subclass and `semora.tool` decorator have been removed. Replace their
+class-body configuration with Pydantic AI's constructor, tools, capabilities, and dependency
+injection. Keep branch identity and durable lifecycle calls on `AgentRuntime`:
+
+```python
+from pydantic_ai import Agent, RunContext
+from semora import AgentRuntime, MemorySteps
+
+
+async def write(ctx: RunContext[AppDeps], path: str, text: str) -> str:
+    return await ctx.deps.files.write(path, text)
+
+
+agent = Agent(model, deps_type=AppDeps, tools=[write])
+runtime = AgentRuntime(MemorySteps())
+outcome = await runtime.run("branch-1", agent, "update the file", deps=deps)
+```
+
+An `AgentSuspended` exception is the durable park signal. Route its `pending_id` to the host and
+call `runtime.resume(...)` when an answer arrives. Semora no longer converts that signal into a
+special run-bound Agent outcome.
 
 ## Direct capability use
 
@@ -82,8 +101,10 @@ Keep Semora controls where policy participates in its durable contract:
 - suspension persistence tied to the branch transition.
 
 Use Pydantic AI capabilities and hooks, or Pydantic AI Harness guardrails, for ordinary input,
-model, tool, and output policy. Existing `ControlPlane` code continues to run in this release while
-that migration happens.
+model, tool, and output policy. `ControlPlane` remains for controls that participate in durable
+input admission, permission decisions, approval revalidation, result journaling, and suspension
+commits. Pass it explicitly to the runtime; policy methods are no longer discovered from an Agent
+subclass.
 
 Semora still does not promise exactly-once external effects. A started call without a committed
 result is `Indeterminate` by default, and retry requires the host's explicit idempotency or

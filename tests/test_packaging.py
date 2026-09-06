@@ -18,7 +18,7 @@ from typing import NamedTuple
 ROOT = Path(__file__).resolve().parent.parent
 PYTHON_ROOTS = (ROOT / "packages", ROOT / "tests")
 
-LAYERS = ["contracts", "ids", "controls", "transcript", "effects", "dispatch", "runtime", "agent"]
+LAYERS = ["contracts", "ids", "controls", "transcript", "effects", "dispatch", "runtime"]
 """Core modules, lowest first. Each may import only the ones before it."""
 
 

@@ -72,9 +72,8 @@ result = await runtime.run(
 state. It delegates every agent step to `Agent.run`. `ExecutionBoundary` is the narrow capability
 that adds Semora's effect and revalidation contract.
 
-The existing `Effects` name becomes a compatibility alias during the migration. The optional
-`semora.Agent` subclass and `@semora.tool` wrapper are deprecated after native-agent examples and
-equivalent runtime ergonomics exist. They must not gain features that mirror Pydantic AI.
+The existing `Effects` name remains a compatibility alias. Semora does not export an Agent class
+or tool decorator; applications use Pydantic AI's native construction APIs.
 
 ## Policy integration
 
@@ -149,18 +148,16 @@ can span multiple attempts.
 
 No code may import Harness private modules such as `_capability`, `_store`, or `_types`.
 
-## Compatibility and release sequence
+## Migration status
 
-This is a staged breaking migration.
+`ExecutionBoundary` is the public capability, and `AgentRuntime` delegates through Pydantic AI's
+public `AbstractAgent.run()` interface. The former `semora.Agent`, `semora.tool`, class-body tool
+discovery, implicit branch binding, and implicit policy discovery have been removed. General
+policy should use Pydantic capabilities, hooks, or Harness guardrails; the remaining Semora
+control points participate in its durable contract.
 
-1. Introduce `ExecutionBoundary`, native-agent documentation, and a compatibility adapter for the
-   four durable `ControlPlane` callbacks. Keep current behavior and tests.
-2. Add optional Harness snapshot interop and a PostgreSQL `StepStore` implementation in a separate
-   package boundary. Do not duplicate Semora effect rows.
-3. Deprecate the optional `semora.Agent`, `@semora.tool`, and general-purpose control points. Add
-   migration examples using `pydantic_ai.Agent`, native tools, hooks, and guardrails.
-4. In the next major release, remove the compatibility layer. Keep only the execution boundary,
-   runtime coordinator, and storage contracts.
+Optional Harness snapshot interop and a PostgreSQL `StepStore` remain separate future integrations.
+They must not duplicate Semora effect rows or weaken result-bearing replay.
 
 Every public API change updates `docs/API.md` and the migration guide. Deprecations include a
 replacement example and remain for one minor release before removal unless maintaining them would
