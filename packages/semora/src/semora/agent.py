@@ -79,6 +79,9 @@ def tool[F: Callable[..., Any]](
     name: str | None = ...,
     description: str | None = ...,
     metadata: dict[str, Any] | None = ...,
+    timeout: float | None = ...,
+    strict: bool | None = ...,
+    defer_loading: bool = ...,
 ) -> Callable[[F], F]: ...
 def tool[F: Callable[..., Any]](
     function: F | None = None,
@@ -89,6 +92,9 @@ def tool[F: Callable[..., Any]](
     name: str | None = None,
     description: str | None = None,
     metadata: dict[str, Any] | None = None,
+    timeout: float | None = None,
+    strict: bool | None = None,
+    defer_loading: bool = False,
 ) -> F | Callable[[F], F]:
     """Mark a method as one of the agent's tools.
 
@@ -98,6 +104,10 @@ def tool[F: Callable[..., Any]](
     `metadata` is the host's own declaration about the tool — a permission class, an owning team —
     carried to `ctx.tool.metadata` at the tool control points. `concurrency_safe` writes its own
     key into it, so a host key must not collide with `CONCURRENCY_SAFE`.
+
+    `timeout`, `strict` and `defer_loading` are Pydantic AI's own tool settings, forwarded
+    untouched. Semora imposes no timeout of its own: a tool that must not run forever says so
+    here.
     """
 
     def mark(fn: F) -> F:
@@ -113,6 +123,9 @@ def tool[F: Callable[..., Any]](
                 "requires_approval": requires_approval,
                 "name": name,
                 "description": description,
+                "timeout": timeout,
+                "strict": strict,
+                "defer_loading": defer_loading,
             },
         )
         return fn

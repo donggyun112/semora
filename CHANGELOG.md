@@ -3,6 +3,13 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
+## Unreleased
+
+- **A gate can read the tool, not only the call.** `Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A permission class the host declared on the tool is read from `ctx.tool.metadata`; before, a policy that wanted one had to keep its own list of tool names beside the tools themselves and hold the two in step by hand. The field defaults to `None`, so an existing control plane is unaffected.
+- `Ctx.run` is Pydantic AI's own `RunContext` at every control point the agent loop reaches, `None` only at `on_suspend`. The other `Ctx` fields are lifted out of it for the common case; this is the rest, and it is what native helpers take, so a gate selects tools with `matches_tool_selector(selector, ctx.run, ctx.tool)` instead of a matching rule of its own.
+- `@tool(metadata={...})` carries the host's own declaration about a method tool, so a class agent no longer has to route the implementation through `uses` to attach one. `concurrency_safe=True` writes `CONCURRENCY_SAFE` into that same mapping; a host key must not use that name.
+- `@tool` forwards Pydantic AI's `timeout`, `strict` and `defer_loading`. Semora imposes no timeout of its own, and a class agent had no way to reach the one Pydantic AI already had.
+
 ## 0.4.0 — 2026-09-06
 
 - **`run_id` is now `branch_id`.** Semora's durable unit carried Pydantic AI's name for one loop, and it is not one loop: a first loop, its resumes and its recoveries share the id, and a fork starts a new one. That unit is a *branch* of a conversation and is named so everywhere: `ExecutionContext.branch_id`, the first argument of every `AgentRuntime` method, `Agent(branch_id=...)`, `new_branch_id()`, the `branch_id` attribute of `Fenced`, `Contended`, `Indeterminate` and `EffectConflict`, `Transcript.record_branch`/`read_branch` with `BRANCH_FIELDS`, and the `branch_id` in entry metadata. Pydantic AI's `run_id` keeps its meaning and now reaches Pydantic AI untouched, `Agent.run_sync` included.

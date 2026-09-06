@@ -14,7 +14,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.tools import ToolDefinition, matches_tool_selector
 from semora import AgentRuntime, Continue, ControlPlane, ControlSignal, Ctx, Halt, MemorySteps
 
 
@@ -113,3 +113,23 @@ async def test_the_tool_control_points_see_the_tool_definition() -> None:
         assert definition.name == "read"
         assert (definition.metadata or {})["permission"] == "read"
     assert seen["before_finish"] is None, "no tool is being decided at a turn-level point"
+
+
+async def test_a_gate_selects_tools_with_pydantic_ais_own_selector() -> None:
+    """`Ctx.run` is the native context, so a policy selects with `matches_tool_selector`."""
+    matched: list[bool] = []
+
+    async def read() -> str:
+        return "ok"
+
+    async def gate(ctx: Ctx, call: ToolCallPart) -> Continue:
+        assert ctx.run is not None and ctx.tool is not None
+        matched.append(await matches_tool_selector({"permission": "read"}, ctx.run, ctx.tool))
+        return Continue()
+
+    agent = Agent(FunctionModel(answer), tools=[Tool(read, metadata={"permission": "read"})])
+    await AgentRuntime(MemorySteps()).recover(
+        "selector", agent, history(), controls=ControlPlane(pre_tool_use=gate)
+    )
+
+    assert matched == [True]

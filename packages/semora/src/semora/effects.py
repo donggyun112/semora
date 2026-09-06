@@ -572,6 +572,7 @@ class Effects(AbstractCapability[Any]):
             text=_last_text(messages),
             subject=self.subject,
             tool=tool,
+            run=ctx,
         )
 
     def _made(self, call: ToolCallPart, *, refused: bool) -> None:

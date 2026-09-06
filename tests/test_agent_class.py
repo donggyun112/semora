@@ -288,6 +288,20 @@ def test_tool_metadata_reaches_the_gate_beside_the_concurrency_mark() -> None:
     assert tools["plain"].metadata is None
 
 
+def test_tool_forwards_pydantic_ais_own_settings() -> None:
+    """`timeout`, `strict` and `defer_loading` are Pydantic AI's; a class agent must reach them."""
+
+    class Slow(Reviewer):
+        @tool(timeout=2.5, strict=True, defer_loading=True)
+        async def crawl(self, url: str) -> str:
+            """Fetch a page. Slow enough to need a bound."""
+            return "ok"
+
+    definition = {t.name: t for t in Slow(Path("/repo"), [])._marked_tools()}["crawl"]
+
+    assert (definition.timeout, definition.strict, definition.defer_loading) == (2.5, True, True)
+
+
 def test_uses_refuses_what_it_cannot_place() -> None:
     class Broken(Reviewer):
         uses = ("web_search",)  # type: ignore[assignment]  # deliberately wrong

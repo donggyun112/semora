@@ -7,6 +7,9 @@ here, `Tool(fn, metadata=...)` for an implementation written elsewhere — and t
 from `ctx.tool`. A call carries a name and arguments and nothing else, so a policy that matched
 on `call.tool_name` would be a second list to keep in step with the first.
 
+Selection is Pydantic AI's `matches_tool_selector` over `ctx.run`, not a rule of our own: the
+same `ToolSelector` a capability or an agent spec uses picks the tools a permission covers.
+
 A tool declared `@tool(requires_approval=True)` is a floor this policy cannot lower: read-class
 tools must not carry that declaration.
 """
@@ -16,22 +19,31 @@ from typing import Any
 
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.tools import ToolSelector, matches_tool_selector
 from semora import Agent, Continue, Ctx, MemorySteps, Permissions, Suspend, tool
 from semora.controls import PreToolUse, ToolDecision
 
 
-def allow(permission: str) -> PreToolUse:
-    """Run tools declared with this permission; park every other call, one `pending_id` each."""
+def allow(selector: ToolSelector[Any]) -> PreToolUse:
+    """Run the tools this selector matches; park every other call, one `pending_id` each.
+
+    The selector is Pydantic AI's own: `'all'`, a sequence of names, a metadata mapping matched by
+    deep inclusion, or a predicate. Matching is `matches_tool_selector`, so a policy and an agent
+    spec select tools by the same rule.
+    """
 
     async def stage(ctx: Ctx, call: ToolCallPart) -> ToolDecision:
-        declared = (ctx.tool.metadata or {}).get("permission") if ctx.tool else None
-        if declared == permission:
+        matched = (
+            ctx.tool is not None
+            and ctx.run is not None
+            and await matches_tool_selector(selector, ctx.run, ctx.tool)
+        )
+        if matched:
             return Continue()
         return Suspend(
             {
                 "pending_id": f"approve-{call.tool_call_id}",
                 "tool": call.tool_name,
-                "permission": declared,
                 "args": call.args_as_dict(),
             }
         )
@@ -56,7 +68,7 @@ class Worker(Agent):
 
     llm = FunctionModel(scripted)
     store = MemorySteps()
-    pre_tool_use = Permissions(allow("read"))  # the whole policy, as a class attribute
+    pre_tool_use = Permissions(allow({"permission": "read"}))  # the whole policy, one attribute
 
     def __init__(self, **kwargs: Any) -> None:
         self.touched: list[str] = []

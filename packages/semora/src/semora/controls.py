@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from pydantic_ai.messages import ModelMessage, ModelRequestPart
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.tools import RunContext, ToolDefinition
 
 from .contracts import PendingInput, StopReason, ToolCall
 
@@ -56,6 +56,15 @@ class Ctx:
     runtime, after the attempt released the tool. A permission class the host declared as tool
     metadata is read from here, because a call carries a name and arguments but never the tool's
     own declaration.
+    """
+    run: RunContext[Any] | None = None
+    """Pydantic AI's own run context, at every control point the agent loop reaches.
+
+    The fields above are the ones a policy reaches for, lifted out so the common case needs no
+    unpacking. This is the rest of what Pydantic AI knows — `deps`, `usage`, `retries`,
+    `tool_call_metadata`, the tool manager — and what native helpers such as
+    `matches_tool_selector` take. `None` only at `on_suspend`, which the runtime reaches after
+    the attempt is over.
     """
 
 
