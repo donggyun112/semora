@@ -43,7 +43,7 @@ from semora_store import (
 from .contracts import AgentSuspended, PendingInput, StopReason
 from .controls import Controls, Ctx, controls_of
 from .dispatch import Command, default_router
-from .effects import PENDING_ROUND, Effects, Resumed, step_key
+from .effects import PENDING_ROUND, ExecutionBoundary, Resumed, step_key
 from .transcript import Branch, messages_at, messages_of
 
 __all__ = ["ACTIVE_SUSPENSION", "AgentRuntime", "Outcome", "unanswered_tool_calls"]
@@ -211,7 +211,7 @@ class AgentRuntime:
                 await store.admit_inputs(execution.branch_id, [prompt_id], token)
         # An explicit control plane wins; otherwise the agent's own methods are the policy.
         controls = controls if controls is not None else controls_of(agent)
-        effects = Effects(
+        effects = ExecutionBoundary(
             store,
             execution.branch_id,
             token,
@@ -509,7 +509,7 @@ class AgentRuntime:
         self,
         execution: ExecutionContext,
         conversation: str,
-        effects: Effects,
+        effects: ExecutionBoundary,
         result: AgentRunResult[Any],
         token: int,
     ) -> None:

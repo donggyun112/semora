@@ -35,7 +35,7 @@ from .controls import (
     writer,
 )
 from .dispatch import Answer, InvalidTransition, Prompt, Recover
-from .effects import CONCURRENCY_SAFE, Effects
+from .effects import CONCURRENCY_SAFE, Effects, ExecutionBoundary
 from .ids import new_branch_id
 from .runtime import AgentRuntime, Outcome
 
@@ -55,6 +55,7 @@ __all__ = [
     "Ctx",
     "Deny",
     "Effects",
+    "ExecutionBoundary",
     "ExecutionContext",
     "Fenced",
     "FinishPolicy",

@@ -15,7 +15,17 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition, matches_tool_selector
-from semora import AgentRuntime, Continue, ControlPlane, ControlSignal, Ctx, Halt, MemorySteps
+from semora import (
+    AgentRuntime,
+    Continue,
+    ControlPlane,
+    ControlSignal,
+    Ctx,
+    Effects,
+    ExecutionBoundary,
+    Halt,
+    MemorySteps,
+)
 
 
 def history() -> list[ModelMessage]:
@@ -133,3 +143,26 @@ async def test_a_gate_selects_tools_with_pydantic_ais_own_selector() -> None:
     )
 
     assert matched == [True]
+
+
+async def test_execution_boundary_is_the_native_agent_capability() -> None:
+    """The primary boundary works directly with Pydantic AI; the old name stays compatible."""
+    store = MemorySteps()
+    called: list[str] = []
+
+    async def read() -> str:
+        called.append("read")
+        return "ok"
+
+    agent = Agent(FunctionModel(answer), tools=[read])
+    result = await Agent.run(
+        agent,
+        None,
+        message_history=history(),
+        capabilities=[ExecutionBoundary(store, "native-boundary")],
+    )
+
+    assert result.output == "done"
+    assert called == ["read"]
+    assert (await store.read("native-boundary", "tool:c1")).value["value"] == "ok"
+    assert Effects is ExecutionBoundary

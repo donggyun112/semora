@@ -65,6 +65,7 @@ from .transcript import stripped
 
 __all__ = [
     "CONCURRENCY_SAFE",
+    "ExecutionBoundary",
     "PENDING_ROUND",
     "Effects",
     "Inputs",
@@ -162,8 +163,8 @@ Record = Callable[[list[ModelMessage]], Awaitable[None]]
 """Persist messages in the exact shape admitted to model-visible history."""
 
 
-class Effects(AbstractCapability[Any]):
-    """Wrap one run's model and tool steps in the ledger and ask the control points at the boundary.
+class ExecutionBoundary(AbstractCapability[Any]):
+    """Enforce Semora's durable execution contract around one Pydantic AI run.
 
     One instance per run, holding that run's fencing token. Without a store the control plane is
     still there, but a crash may run a tool again and a suspension has nowhere to park.
@@ -603,3 +604,7 @@ def _last_text(messages: list[ModelMessage]) -> str:
         if isinstance(message, ModelResponse):
             return "".join(part.content for part in message.parts if isinstance(part, TextPart))
     return ""
+
+
+Effects = ExecutionBoundary
+"""Compatibility alias for the execution capability's original name."""
