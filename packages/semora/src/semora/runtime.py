@@ -52,6 +52,7 @@ ACTIVE_SUSPENSION = "agent:active-suspension"
 """Control key holding the run-level continuation of a parked round."""
 
 _PART: TypeAdapter[ModelRequestPart] = TypeAdapter(ModelRequestPart)
+_DEFERRED_REQUESTS: TypeAdapter[DeferredToolRequests] = TypeAdapter(DeferredToolRequests)
 
 
 def suspend_key(call_id: str) -> str:
@@ -548,17 +549,7 @@ class AgentRuntime:
             first = parked[0][0].tool_call_id
             continuation = {
                 "origin": "pre_tool_use",
-                "calls": [
-                    {
-                        "call": {
-                            "tool_name": call.tool_name,
-                            "args": call.args_as_dict(),
-                            "tool_call_id": call.tool_call_id,
-                        },
-                        "request": request,
-                    }
-                    for call, request in parked
-                ],
+                "deferred": _DEFERRED_REQUESTS.dump_python(requests, mode="json"),
                 "messages": to_jsonable_python(messages),
                 "completed": completed,
                 "rules_version": effects.rules_version,
@@ -632,12 +623,13 @@ class AgentRuntime:
         rejoined = _execution_context(
             execution, None if remembered == execution.branch_id else remembered
         )
+        deferred_tool_results = _deferred_requests(active).build_results(approvals=approvals)
         outcome = await self._attempt(
             rejoined,
             token,
             agent,
             message_history=history,
-            deferred_tool_results=DeferredToolResults(approvals=approvals),
+            deferred_tool_results=deferred_tool_results,
             controls=controls,
             rules_version=rules_version,
             deps=deps,
@@ -779,17 +771,17 @@ def _round_results(messages: Sequence[ModelMessage]) -> list[dict[str, Any]]:
 
 
 def _decode_parked(active: dict[str, Any]) -> list[tuple[ToolCallPart, dict[str, Any]]]:
-    return [
-        (
-            ToolCallPart(
-                tool_name=entry["call"]["tool_name"],
-                args=entry["call"]["args"],
-                tool_call_id=entry["call"]["tool_call_id"],
-            ),
-            dict(entry["request"]),
-        )
-        for entry in active["continuation"]["calls"]
-    ]
+    requests = _deferred_requests(active)
+    return [(call, dict(requests.metadata[call.tool_call_id])) for call in requests.approvals]
+
+
+def _deferred_requests(active: dict[str, Any]) -> DeferredToolRequests:
+    requests = _DEFERRED_REQUESTS.validate_python(active["continuation"]["deferred"])
+    actual = [call.tool_call_id for call in requests.approvals]
+    expected = list(active["call_ids"])
+    if actual != expected or any(call_id not in requests.metadata for call_id in actual):
+        raise ValueError("stored deferred requests do not match the active suspension")
+    return requests
 
 
 def _undecided(active: dict[str, Any]) -> list[tuple[str, str]]:

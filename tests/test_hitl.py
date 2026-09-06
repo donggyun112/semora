@@ -1,7 +1,8 @@
 """Policy lands at a seam, a suspension parks the worker, resume re-decides under current rules."""
 
 import pytest
-from pydantic_ai import Agent, RunContext
+from pydantic import TypeAdapter
+from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     ModelMessage,
@@ -31,7 +32,10 @@ from semora.controls import (
     Suspend,
     ToolDecision,
 )
+from semora.runtime import ACTIVE_SUSPENSION
 from semora_store import MemorySteps
+
+DEFERRED_REQUESTS = TypeAdapter(DeferredToolRequests)
 
 
 class Files:
@@ -112,6 +116,46 @@ async def test_the_gate_suspends_instead_of_blocking_on_an_answer() -> None:
     assert parked.value.pending == [("approve-c00", "c00")]
     assert files.ran == [], "the worker did not wait on a person; it parked and left"
     assert (await store.read("run-1", "tool:c00")).status == "absent"
+
+
+async def test_a_park_persists_the_native_deferred_request() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(files.write)
+
+    with pytest.raises(AgentSuspended):
+        await AgentRuntime(store).run(
+            "native-park",
+            agent,
+            "delete",
+            controls=ControlPlane(pre_tool_use=ask_for("stale.md")),
+        )
+
+    active = await store.read("native-park", ACTIVE_SUSPENSION)
+    continuation = active.value["continuation"]
+    requests = DEFERRED_REQUESTS.validate_python(continuation["deferred"])
+    assert [call.tool_call_id for call in requests.approvals] == ["c00"]
+    assert requests.metadata["c00"]["pending_id"] == "approve-c00"
+    assert "calls" not in continuation
+
+
+async def test_resume_lets_pydantic_apply_approved_argument_overrides() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(files.write)
+    controls = ControlPlane(pre_tool_use=ask_for("stale.md"))
+
+    with pytest.raises(AgentSuspended) as parked:
+        await AgentRuntime(store).run("override", agent, "delete", controls=controls)
+
+    await AgentRuntime(store).resume(
+        "override",
+        parked.value.pending_id or "",
+        {"type": "approve", "args": {"path": "reviewed.md"}},
+        agent,
+        controls=controls,
+    )
+    assert files.ran == ["reviewed.md"]
 
 
 async def test_a_suspension_survives_the_process_and_the_run_continues() -> None:
