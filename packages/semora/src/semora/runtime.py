@@ -41,7 +41,7 @@ from semora_store import (
 )
 
 from .contracts import AgentSuspended, PendingInput, StopReason
-from .controls import Controls, Ctx, controls_of
+from .controls import Controls, Ctx
 from .dispatch import Command, default_router
 from .effects import PENDING_ROUND, ExecutionBoundary, Resumed, step_key
 from .transcript import Branch, messages_at, messages_of
@@ -209,8 +209,6 @@ class AgentRuntime:
                 prompt = None  # delivered once: the earlier attempt already carried it
             else:
                 await store.admit_inputs(execution.branch_id, [prompt_id], token)
-        # An explicit control plane wins; otherwise the agent's own methods are the policy.
-        controls = controls if controls is not None else controls_of(agent)
         effects = ExecutionBoundary(
             store,
             execution.branch_id,

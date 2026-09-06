@@ -13,7 +13,6 @@ from semora_store import (
     MemoryTranscript,
 )
 
-from .agent import Agent, tool
 from .contracts import AgentSuspended, ControlSignal, PendingInput, StopReason, Suspended
 from .controls import (
     Continue,
@@ -43,7 +42,6 @@ __version__ = "0.5.0"
 
 __all__ = [
     "CONCURRENCY_SAFE",
-    "Agent",
     "AgentRuntime",
     "AgentSuspended",
     "Answer",
@@ -81,6 +79,5 @@ __all__ = [
     "__version__",
     "gate",
     "new_branch_id",
-    "tool",
     "writer",
 ]

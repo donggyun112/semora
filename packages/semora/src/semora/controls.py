@@ -32,7 +32,6 @@ __all__ = [
     "Suspending",
     "ToolDecision",
     "TurnDecision",
-    "controls_of",
     "gate",
     "writer",
 ]
@@ -374,25 +373,3 @@ class ControlPlane:
         if self._on_suspend is not None:
             await self._on_suspend(ctx, call, request, snapshot, completed)
 
-
-CONTROL_POINTS = (
-    "on_inputs",
-    "before_model",
-    "pre_tool_use",
-    "post_tool_use",
-    "before_finish",
-    "on_resume",
-    "on_suspend",
-)
-"""The seven decision points, in loop order."""
-
-
-def controls_of(agent: object) -> Controls | None:
-    """The control plane an agent carries as methods, or `None` when it defines none.
-
-    A class that subclasses `pydantic_ai.Agent` and defines `pre_tool_use`, `before_finish` and
-    the rest as methods is its own default policy. An explicit `controls=` at run time replaces
-    it whole, so one agent can run under different rules.
-    """
-    found = {name: getattr(agent, name) for name in CONTROL_POINTS if hasattr(agent, name)}
-    return ControlPlane(**found) if found else None
