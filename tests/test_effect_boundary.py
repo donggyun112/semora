@@ -21,13 +21,18 @@ from semora import (
     ControlPlane,
     ControlSignal,
     Ctx,
+    Deny,
     Effects,
     ExecutionBoundary,
     Halt,
     Indeterminate,
     MemorySteps,
+    Permissions,
+    ResumeInput,
+    Suspend,
 )
 from semora.journal import EffectJournal, step_key
+from semora.policy import NOT_EXECUTED, PolicyRunner, Resumed
 
 
 def history() -> list[ModelMessage]:
@@ -117,6 +122,94 @@ async def test_effect_journal_replays_one_post_tool_projection() -> None:
 
     assert first == second == committed
     assert projected == [committed]
+
+
+async def test_policy_runner_asks_pre_tool_for_a_fresh_call() -> None:
+    async def ask(ctx: Ctx, call: ToolCallPart) -> Suspend:
+        return Suspend({"pending_id": f"approve-{call.tool_call_id}"})
+
+    runner = PolicyRunner(
+        controls=ControlPlane(pre_tool_use=Permissions(ask)),
+        rules_version="v1",
+        subject="민수",
+        resumed={},
+        regate=(),
+    )
+    call = ToolCallPart("write", {"path": "a.txt"}, tool_call_id="c1")
+    decision = await runner.decide_tool(
+        Ctx(turn=0), call, call.args_as_dict(), approved=False, recorded=False
+    )
+    assert decision == Suspend({"pending_id": "approve-c1"})
+
+
+async def test_policy_runner_revalidates_approved_arguments_on_resume() -> None:
+    seen: list[str] = []
+
+    async def recheck(ctx: Ctx, call: ToolCallPart, resume: ResumeInput) -> Continue:
+        seen.append(str(call.args_as_dict()["path"]))
+        return Continue()
+
+    runner = PolicyRunner(
+        controls=ControlPlane(on_resume=recheck),
+        rules_version="v2",
+        subject="민수",
+        resumed={"c1": Resumed({"type": "approve"}, {"pending_id": "p1"}, "v1")},
+        regate=(),
+    )
+    call = ToolCallPart("write", {"path": "old.txt"}, tool_call_id="c1")
+    decision = await runner.decide_tool(
+        Ctx(turn=1),
+        call,
+        {"path": "reviewed.txt"},
+        approved=True,
+        recorded=False,
+    )
+    assert isinstance(decision, Continue)
+    assert seen == ["reviewed.txt"]
+
+
+async def test_policy_runner_does_not_regate_a_committed_call() -> None:
+    async def unexpected(ctx: Ctx, call: ToolCallPart) -> Continue:
+        raise AssertionError("a committed effect must replay without a fresh gate")
+
+    runner = PolicyRunner(
+        controls=ControlPlane(pre_tool_use=Permissions(unexpected)),
+        rules_version="v1",
+        subject="",
+        resumed={},
+        regate=(),
+    )
+    call = ToolCallPart("write", {"path": "a.txt"}, tool_call_id="c1")
+    decision = await runner.decide_tool(
+        Ctx(turn=0), call, call.args_as_dict(), approved=False, recorded=True
+    )
+    assert isinstance(decision, Continue)
+
+
+async def test_policy_runner_keeps_the_rest_of_a_suspended_batch_parked() -> None:
+    async def gate(ctx: Ctx, call: ToolCallPart) -> Continue | Suspend:
+        if call.tool_call_id == "c1":
+            return Suspend({"pending_id": "approve-c1"})
+        return Continue()
+
+    runner = PolicyRunner(
+        controls=ControlPlane(pre_tool_use=Permissions(gate)),
+        rules_version="v1",
+        subject="",
+        resumed={},
+        regate=(),
+    )
+    first = ToolCallPart("write", {"path": "a.txt"}, tool_call_id="c1")
+    second = ToolCallPart("write", {"path": "b.txt"}, tool_call_id="c2")
+    runner.begin_tool_round()
+    first_decision = await runner.decide_tool(
+        Ctx(turn=0), first, first.args_as_dict(), approved=False, recorded=False
+    )
+    second_decision = await runner.decide_tool(
+        Ctx(turn=0), second, second.args_as_dict(), approved=False, recorded=False
+    )
+    assert isinstance(first_decision, Suspend)
+    assert second_decision == Deny(NOT_EXECUTED)
 
 
 async def test_runtime_signal_leaves_an_unreported_effect() -> None:

@@ -17,8 +17,7 @@ when an approved call comes back, and the three turn-level points around the gra
 """
 
 from collections.abc import Awaitable, Callable, Collection, Mapping
-from dataclasses import replace
-from typing import Any, NamedTuple, Protocol
+from typing import Any, Protocol
 
 from pydantic_ai import CallToolsNode, DeferredToolRequests, ModelRequestNode, RunContext
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
@@ -31,7 +30,6 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    TextPart,
     ToolCallPart,
     UserPromptPart,
 )
@@ -42,21 +40,13 @@ from pydantic_graph import End
 from semora_store import ExecutionStore
 
 from .contracts import PendingInput, StopReason
-from .controls import (
-    Continue,
-    Controls,
-    Ctx,
-    Deny,
-    Halt,
-    Proceed,
-    ResumeInput,
-    Suspend,
-    ToolDecision,
-)
+from .controls import Controls, Deny, Halt, Proceed, Suspend
 from .journal import EffectJournal, after_key, model_step_key, step_key
+from .policy import CONCURRENCY_SAFE, NOT_EXECUTED, PolicyRunner, Resumed, last_text
 
 __all__ = [
     "CONCURRENCY_SAFE",
+    "NOT_EXECUTED",
     "PENDING_ROUND",
     "Effects",
     "ExecutionBoundary",
@@ -69,19 +59,11 @@ __all__ = [
     "step_key",
 ]
 
-CONCURRENCY_SAFE = "concurrency_safe"
-"""Tool metadata flag. Without it a tool is a barrier: the batch runs in call order."""
-
 PENDING_ROUND = "agent:pending-round"
 """Control key holding the latest model-issued call order, committed before any gate or effect."""
 
 INPUT_IDS = "input_ids"
 """`ModelRequest.metadata` key naming the queued inputs a request carried into model context."""
-
-NOT_EXECUTED = (
-    "not executed: an earlier call in this round awaits approval; reissue it once that is decided"
-)
-"""Model-visible stand-in for a call behind a suspension. The effect did not happen."""
 
 
 def represented_inputs(messages: list[ModelMessage]) -> set[str]:
@@ -92,14 +74,6 @@ def represented_inputs(messages: list[ModelMessage]) -> set[str]:
         if isinstance(message, ModelRequest)
         for input_id in (message.metadata or {}).get(INPUT_IDS, [])
     }
-
-
-class Resumed(NamedTuple):
-    """What a parked call comes back with: the answer, the request it answers, the rules then."""
-
-    answer: dict[str, Any]
-    request: dict[str, Any]
-    rules_version: str
 
 
 class Inputs(Protocol):
@@ -173,18 +147,25 @@ class ExecutionBoundary(AbstractCapability[Any]):
         self.retry_running = retry_running
         self.rules_version = rules_version
         self.subject = subject
-        self.resumed: Mapping[str, Resumed] = resumed or {}
         self.inputs = inputs
         self.record = record
-        self.regate = set(regate)
         self.cancelled = cancelled
         self.journal = EffectJournal(store, branch_id, token, retry_running=retry_running)
-        self.calls_made: list[dict[str, Any]] = []
+        self.policy = PolicyRunner(
+            controls=controls,
+            rules_version=rules_version,
+            subject=subject,
+            resumed=resumed or {},
+            regate=regate,
+        )
         self.stop_reason: StopReason | None = None
         self.turn = 0
-        self._suspended_this_round = False
         self._prefetched: list[PendingInput] = []
-        self._approval_tools: set[str] = set()
+
+    @property
+    def calls_made(self) -> list[dict[str, Any]]:
+        """Tool decisions visible to the runtime and later control points."""
+        return self.policy.calls_made
 
     def get_ordering(self) -> CapabilityOrdering:
         """Sit outermost so no other capability catches a ledger signal first."""
@@ -202,15 +183,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
         AI's own deferral: that one would park the call before any gate ran, with no `pending_id`
         an answer could be routed back to.
         """
-        prepared: list[ToolDefinition] = []
-        for tool in tool_defs:
-            if tool.kind == "unapproved":
-                self._approval_tools.add(tool.name)
-                tool = replace(tool, kind="function")
-            if not (tool.metadata or {}).get(CONCURRENCY_SAFE):
-                tool = replace(tool, sequential=True)
-            prepared.append(tool)
-        return prepared
+        return self.policy.prepare_tools(tool_defs)
 
     # ── turn-level control points, around the graph's nodes ──────────────────
 
@@ -233,7 +206,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
                 return self._halt(ctx, "aborted")
             return await self._admit(ctx, node, handler)
         if isinstance(node, CallToolsNode):
-            self._suspended_this_round = False
+            self.policy.begin_tool_round()
             await self._record_pending(ctx, node)
             result = await handler(node)
             parked = isinstance(result, End) and isinstance(
@@ -261,7 +234,9 @@ class ExecutionBoundary(AbstractCapability[Any]):
         ]
         steers: list[Any] = []
         if self.controls is not None:
-            here = self._ctx(ctx, pending=[request] if ctx.messages[-1:] != [request] else [])
+            here = self.policy.context(
+                ctx, pending=[request] if ctx.messages[-1:] != [request] else []
+            )
             if inputs:
                 # Screened before `before_model` reads them: a gate deciding on the pending
                 # messages must see what will actually enter context, never a pre-mask original.
@@ -322,7 +297,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
         if self.controls is None:
             self.stop_reason = "completed"
             return result
-        decision = await self.controls.before_finish(self._ctx(ctx), "completed")
+        decision = await self.controls.before_finish(self.policy.context(ctx), "completed")
         if isinstance(decision, Proceed):
             return ModelRequestNode[Any, Any](request=ModelRequest(parts=list(decision.steers)))
         self.stop_reason = decision.reason
@@ -330,7 +305,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
 
     def _halt(self, ctx: RunContext[Any], reason: StopReason) -> End[Any]:
         self.stop_reason = reason
-        return End(FinalResult(output=_last_text(ctx.messages)))
+        return End(FinalResult(output=last_text(ctx.messages)))
 
     # ── the model boundary ────────────────────────────────────────────────────
 
@@ -355,58 +330,20 @@ class ExecutionBoundary(AbstractCapability[Any]):
         args: Any,
     ) -> Any:
         """Ask the gate. A denial is a result the model sees; a suspension parks first."""
-        here = self._ctx(ctx, tool=tool_def)
-        decision: ToolDecision
-        if call.tool_call_id not in self.regate and await self.journal.recorded(call.tool_call_id):
-            # The effect happened. No gate can undo it, and asking a person to approve it would
-            # be asking about the past: the record replays and only the journal sees it. A fork
-            # that wants the new policy's verdict on a copied record says so with `regate`.
-            decision = Continue()
-        elif ctx.tool_call_approved:
-            # `args` is what will run: the answer may have replaced the model's arguments.
-            call = replace(call, args=args) if isinstance(args, dict) else call
-            decision = await self._resume_decision(here, call)
-        else:
-            decision = await self._gate(here, call)
+        decision = await self.policy.decide_tool(
+            self.policy.context(ctx, tool=tool_def),
+            call,
+            args,
+            approved=ctx.tool_call_approved,
+            recorded=await self.journal.recorded(call.tool_call_id),
+        )
         match decision:
             case Deny(result):
-                self._made(call, refused=True)
                 raise SkipToolExecution(result)
             case Suspend(request):
-                if not request.get("pending_id"):
-                    raise ValueError(f"suspension of {call.tool_call_id!r} carries no pending_id")
-                self._suspended_this_round = True
-                self._made(call, refused=True)
                 raise ApprovalRequired(metadata=dict(request))
             case _:
-                self._made(call, refused=False)
                 return args
-
-    async def _gate(self, here: Ctx, call: ToolCallPart) -> ToolDecision:
-        decision = (
-            await self.controls.pre_tool_use(here, call)
-            if self.controls is not None
-            else Continue()
-        )
-        if isinstance(decision, Continue) and call.tool_name in self._approval_tools:
-            decision = Suspend({"pending_id": call.tool_call_id})
-        if self._suspended_this_round and not isinstance(decision, Suspend):
-            # Behind a suspension only another suspension is kept, so every approval of the round
-            # parks together. Anything else waits: it must not run before the earlier call is
-            # decided.
-            return Deny(NOT_EXECUTED)
-        return decision
-
-    async def _resume_decision(self, here: Ctx, call: ToolCallPart) -> ToolDecision:
-        """Ask `on_resume` about an approved call that still has to run."""
-        resumed = self.resumed.get(call.tool_call_id)
-        if resumed is None or self.controls is None:
-            return Continue()
-        return await self.controls.on_resume(
-            here,
-            call,
-            ResumeInput(resumed.answer, resumed.request, resumed.rules_version, self.rules_version),
-        )
 
     async def wrap_tool_execute(
         self,
@@ -421,13 +358,7 @@ class ExecutionBoundary(AbstractCapability[Any]):
         record = await self.journal.tool(call.tool_call_id, args, handler)
 
         async def project(committed: dict[str, Any]) -> None:
-            assert self.controls is not None
-            result = (
-                committed["value"]
-                if committed["ok"]
-                else {"type": "error", "message": committed["error"]}
-            )
-            await self.controls.post_tool_use(self._ctx(ctx, tool=tool_def), call, result)
+            await self.policy.after_tool(self.policy.context(ctx, tool=tool_def), call, committed)
 
         record = await self.journal.project_once(
             call.tool_call_id, record, project if self.controls is not None else None
@@ -435,43 +366,6 @@ class ExecutionBoundary(AbstractCapability[Any]):
         if record["ok"]:
             return record["value"]
         raise ToolFailed(record["error"])
-
-    # ── context ───────────────────────────────────────────────────────────────
-
-    def _ctx(
-        self,
-        ctx: RunContext[Any],
-        *,
-        pending: list[ModelMessage] | None = None,
-        tool: ToolDefinition | None = None,
-    ) -> Ctx:
-        messages = [*ctx.messages, *(pending or [])]
-        return Ctx(
-            turn=ctx.run_step,
-            messages=messages,
-            calls_made=list(self.calls_made),
-            text=_last_text(messages),
-            subject=self.subject,
-            tool=tool,
-            run=ctx,
-        )
-
-    def _made(self, call: ToolCallPart, *, refused: bool) -> None:
-        entry: dict[str, Any] = {
-            "id": call.tool_call_id,
-            "name": call.tool_name,
-            "input": call.args_as_dict(),
-        }
-        if refused:
-            entry["refused"] = True
-        self.calls_made.append(entry)
-
-
-def _last_text(messages: list[ModelMessage]) -> str:
-    for message in reversed(messages):
-        if isinstance(message, ModelResponse):
-            return "".join(part.content for part in message.parts if isinstance(part, TextPart))
-    return ""
 
 
 Effects = ExecutionBoundary
