@@ -65,9 +65,9 @@ from .transcript import stripped
 
 __all__ = [
     "CONCURRENCY_SAFE",
-    "ExecutionBoundary",
     "PENDING_ROUND",
     "Effects",
+    "ExecutionBoundary",
     "Inputs",
     "Record",
     "Resumed",

@@ -307,6 +307,8 @@ class Agent(PydanticAgent[Any, Any]):
         rules_version: str = "",
         conversation_id: str | None = None,
         deps: Any = None,
+        capabilities: Sequence[AbstractCapability[Any]] = (),
+        **options: Any,
     ) -> Outcome:
         """Route a person's answer to the parked call; current policy re-decides.
 
@@ -330,6 +332,8 @@ class Agent(PydanticAgent[Any, Any]):
                 rules_version=rules_version,
                 conversation_id=conversation_id,
                 deps=deps,
+                capabilities=capabilities,
+                **options,
             ),
         )
 
@@ -342,6 +346,8 @@ class Agent(PydanticAgent[Any, Any]):
         rules_version: str = "",
         conversation_id: str | None = None,
         deps: Any = None,
+        capabilities: Sequence[AbstractCapability[Any]] = (),
+        **options: Any,
     ) -> Outcome:
         """Finish an interrupted run. Without `history`, the transcript supplies it.
 
@@ -358,6 +364,8 @@ class Agent(PydanticAgent[Any, Any]):
                 rules_version=rules_version,
                 conversation_id=conversation_id,
                 deps=deps,
+                capabilities=capabilities,
+                **options,
             )
         else:
             attempt = self.runtime.recover(
@@ -368,6 +376,8 @@ class Agent(PydanticAgent[Any, Any]):
                 rules_version=rules_version,
                 conversation_id=conversation_id,
                 deps=deps,
+                capabilities=capabilities,
+                **options,
             )
         return await self._attempt(bound, attempt)
 

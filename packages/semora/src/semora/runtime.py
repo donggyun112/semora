@@ -261,6 +261,8 @@ class AgentRuntime:
         rules_version: str = "",
         conversation_id: str | None = None,
         deps: Any = None,
+        capabilities: Sequence[AbstractCapability[Any]] = (),
+        **options: Any,
     ) -> Outcome:
         """Route an answer by its suspension's external `pending_id`.
 
@@ -289,7 +291,17 @@ class AgentRuntime:
             if undecided:
                 raise AgentSuspended(undecided[0][0], undecided[0][1], pending=undecided)
             return await self._finalize(
-                execution, token, agent, active, answers, parked, controls, rules_version, deps
+                execution,
+                token,
+                agent,
+                active,
+                answers,
+                parked,
+                controls,
+                rules_version,
+                deps,
+                capabilities=capabilities,
+                **options,
             )
 
     async def recover(
@@ -302,6 +314,8 @@ class AgentRuntime:
         rules_version: str = "",
         conversation_id: str | None = None,
         deps: Any = None,
+        capabilities: Sequence[AbstractCapability[Any]] = (),
+        **options: Any,
     ) -> Outcome:
         """Finish an interrupted run from the transcript the dead worker committed.
 
@@ -329,6 +343,8 @@ class AgentRuntime:
                         controls,
                         rules_version,
                         deps,
+                        capabilities=capabilities,
+                        **options,
                     )
                 recorded = await store.read(execution.branch_id, PENDING_ROUND)
                 if recorded.status == "done":
@@ -343,6 +359,8 @@ class AgentRuntime:
                 controls=controls,
                 rules_version=rules_version,
                 deps=deps,
+                capabilities=capabilities,
+                **options,
             )
 
     async def fork(
@@ -578,6 +596,8 @@ class AgentRuntime:
         controls: Controls | None,
         rules_version: str,
         deps: Any,
+        capabilities: Sequence[AbstractCapability[Any]] = (),
+        **options: Any,
     ) -> Outcome:
         """Idempotently finish a fully answered continuation after resume or recovery."""
         store = self._require_store(execution)
@@ -625,8 +645,10 @@ class AgentRuntime:
             controls=controls,
             rules_version=rules_version,
             deps=deps,
+            capabilities=capabilities,
             _resumed=resumed,
             _cancelled=cancelled,
+            **options,
         )
         await store.write_control(
             execution.branch_id,

@@ -1,7 +1,8 @@
 """Policy lands at a seam, a suspension parks the worker, resume re-decides under current rules."""
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -12,6 +13,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.tools import ToolDefinition
 from semora import AgentRuntime, AgentSuspended
 from semora.contracts import PendingInput, StopReason
 from semora.controls import (
@@ -39,6 +41,24 @@ class Files:
     async def write(self, path: str) -> str:
         self.ran.append(path)
         return f"wrote {path}"
+
+
+class SeenTools(AbstractCapability[None]):
+    """Record the native Pydantic tool boundary crossed by an attempt."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def before_tool_execute(
+        self,
+        ctx: RunContext[None],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, object],
+    ) -> dict[str, object]:
+        self.calls.append(call.tool_call_id)
+        return args
 
 
 def scripted(*rounds: list[str]) -> tuple[Agent[None, str], list[list[ModelMessage]]]:
@@ -110,6 +130,28 @@ async def test_a_suspension_survives_the_process_and_the_run_continues() -> None
     assert files.ran == ["stale.md"]
     assert outcome.output == "done"
     assert tool_returns(seen[-1]) == [("c00", "wrote stale.md")]
+
+
+async def test_resume_keeps_caller_supplied_pydantic_capabilities() -> None:
+    """A fresh resume attempt must receive the host's native security capabilities."""
+    store, files = MemorySteps(), Files()
+    agent, _ = scripted(["stale.md"])
+    agent.tool_plain(requires_approval=True)(files.write)
+    runtime = AgentRuntime(store)
+
+    with pytest.raises(AgentSuspended) as parked:
+        await runtime.run("native-resume", agent, "delete")
+
+    seen = SeenTools()
+    await runtime.resume(
+        "native-resume",
+        parked.value.pending_id or "",
+        {"type": "approve"},
+        agent,
+        capabilities=[seen],
+    )
+
+    assert seen.calls == ["c00"]
 
 
 async def test_resume_revalidates_the_latest_policy_before_the_effect() -> None:

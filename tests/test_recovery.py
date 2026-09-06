@@ -6,9 +6,11 @@ results are restored, `absent` calls run, and a call that started and never fini
 """
 
 import asyncio
+from typing import Any
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -18,6 +20,7 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.tools import ToolDefinition
 from semora import AgentRuntime, ControlPlane
 from semora.controls import Continue, Ctx, Suspend, ToolDecision
 from semora_store import Indeterminate, MemorySteps
@@ -35,6 +38,24 @@ class Files:
             await self.block.wait()
         self.contents[path] = text
         return f"wrote {path}"
+
+
+class SeenTools(AbstractCapability[None]):
+    """Record native Pydantic tool boundaries during recovery."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def before_tool_execute(
+        self,
+        ctx: RunContext[None],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append(call.tool_call_id)
+        return args
 
 
 def never_asked_twice() -> tuple[Agent[None, str], list[int]]:
@@ -84,6 +105,26 @@ async def test_committed_call_replays_and_absent_call_runs() -> None:
     assert files.ran == ["b.md"], "the committed write must not run a second time"
     assert outcome.output == "both written"
     assert consulted == [3], "the model was consulted once, for the answer, with both results"
+
+
+async def test_recovery_keeps_caller_supplied_pydantic_capabilities() -> None:
+    """A recovered attempt must compose with capabilities rebuilt by its host."""
+    store, files = MemorySteps(), Files()
+    agent, _ = never_asked_twice()
+    agent.tool_plain(files.write)
+    await store.start("native-recover", "tool:c1")
+    await store.finish_effect("native-recover", "tool:c1", {"ok": True, "value": "wrote a.md"})
+    seen = SeenTools()
+
+    await AgentRuntime(store).recover(
+        "native-recover",
+        agent,
+        dead_workers_transcript(),
+        capabilities=[seen],
+    )
+
+    assert seen.calls == ["c1", "c2"]
+    assert files.ran == ["b.md"]
 
 
 async def test_a_finished_call_is_not_gated_again_on_recovery() -> None:
