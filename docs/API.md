@@ -129,7 +129,7 @@ Semora does not currently provide a `BaseDurabilityCapability` backend. Pydantic
 `cache_key` is an opaque tuple containing live runtime objects for relevant operations, so Semora
 does not derive durable identity from tuple positions or `repr()`. Such a backend requires a
 stable serializable invocation identity from Pydantic or a Semora-owned transactional operation
-cursor. Compose existing durability capabilities through `AgentRuntime(capabilities=[capability])` in
-the meantime.
+cursor. Compose existing durability capabilities through the `capabilities=[capability]` argument
+on `AgentRuntime.run()`, `resume()`, and `recover()` in the meantime.
 
 `Contended` means another worker holds the run lease. `Fenced` means a stale writer's token was rejected. `Indeterminate` includes `branch_id` and `step`. `InvalidTransition` (from `semora.dispatch`) carries the observed `state` and rejected `command`. Do not convert these signals into ordinary tool errors in host adapters.

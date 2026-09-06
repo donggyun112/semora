@@ -151,8 +151,9 @@ A production `SemoraDurability(BaseDurabilityCapability)` becomes safe when eith
    frontier without renumbering operations.
 
 Until one condition holds, Semora composes with Pydantic durability capabilities through
-`AgentRuntime(capabilities=[capability])`. It does not inspect Pydantic private tuple layouts or
-claim a generic durable backend it cannot identify safely.
+the `capabilities=[capability]` argument on `AgentRuntime.run()`, `resume()`, and `recover()`. It
+does not inspect Pydantic private tuple layouts or claim a generic durable backend it cannot
+identify safely.
 
 ## Policy integration
 
