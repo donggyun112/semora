@@ -183,6 +183,7 @@ class Effects(AbstractCapability[Any]):
         inputs: Inputs | None = None,
         record: Record | None = None,
         regate: Collection[str] = (),
+        cancelled: bool = False,
     ) -> None:
         """Bind the ledger, the run, its token, and the policy in force for this attempt.
 
@@ -201,6 +202,9 @@ class Effects(AbstractCapability[Any]):
             regate: Call ids whose finished record is a copy from another run, to be gated
                 again under this run's policy before it is replayed. Everything else that is
                 already recorded bypasses the gate.
+            cancelled: A person refused one of the calls this attempt finishes. The round still
+                completes — every call it approved runs and the refusal is recorded as that
+                call's result — but the model is not asked again afterwards.
         """
         self.store = store
         self.branch_id = branch_id
@@ -213,6 +217,7 @@ class Effects(AbstractCapability[Any]):
         self.inputs = inputs
         self.record = record
         self.regate = set(regate)
+        self.cancelled = cancelled
         self.calls_made: list[dict[str, Any]] = []
         self.stop_reason: StopReason | None = None
         self.turn = 0
@@ -258,6 +263,13 @@ class Effects(AbstractCapability[Any]):
         """Admit inputs, steer the model, record the round, and verify the finish."""
         self.turn = ctx.run_step
         if isinstance(node, ModelRequestNode):
+            if self.cancelled:
+                # The round this attempt finishes carried a refusal. Its approved calls have run,
+                # and this request is what carries every call's result — the refusal included — so
+                # it joins history. What does not happen is the request itself: shown a refusal the
+                # model would call again, and the same person would answer the same prompt again.
+                ctx.messages.append(node.request)
+                return self._halt(ctx, "aborted")
             return await self._admit(ctx, node, handler)
         if isinstance(node, CallToolsNode):
             self._suspended_this_round = False

@@ -146,7 +146,12 @@ async def test_resume_revalidates_the_latest_policy_before_the_effect() -> None:
     assert "revoked" in str(tool_returns(seen[-1])[0][1])
 
 
-async def test_a_denied_human_answer_cannot_be_lifted_by_the_resume_handler() -> None:
+async def test_a_refusal_ends_the_run_without_asking_the_model_again() -> None:
+    """A person's refusal is not a result to reason about: the model never sees the round.
+
+    Handed one, the model would call the tool again and the same person would answer the same
+    prompt again, without bound. The refusal is still the call's recorded result.
+    """
     store, files = MemorySteps(), Files()
     agent, seen = scripted(["stale.md"])
     agent.tool_plain(files.write)
@@ -155,6 +160,7 @@ async def test_a_denied_human_answer_cannot_be_lifted_by_the_resume_handler() ->
             "run-4", agent, "delete", controls=ControlPlane(pre_tool_use=ask_for("stale.md"))
         )
     asked: list[str] = []
+    rounds = len(seen)
 
     async def lift(ctx: Ctx, call: ToolCallPart, resume: ResumeInput) -> ToolDecision:
         asked.append(call.tool_call_id)
@@ -168,9 +174,44 @@ async def test_a_denied_human_answer_cannot_be_lifted_by_the_resume_handler() ->
         controls=ControlPlane(on_resume=lift),
     )
 
-    assert files.ran == [] and asked == []
-    assert outcome.output == "done"
-    assert tool_returns(seen[-1]) == [("c00", "no")]
+    assert files.ran == [] and asked == [], "a refused call runs nothing and re-decides nothing"
+    assert outcome.stop_reason == "aborted"
+    assert len(seen) == rounds, "the model was not asked again"
+    assert tool_returns(outcome.all_messages()) == [("c00", "no")], "still the call's result"
+
+
+async def test_a_refusal_in_a_batch_still_runs_what_the_person_approved() -> None:
+    """One refusal ends the round, not the calls beside it that the same person allowed."""
+    store, files = MemorySteps(), Files()
+    agent, seen = scripted(["a.md", "b.md", "c.md"])
+    agent.tool_plain(files.write)
+    runtime = AgentRuntime(store)
+    with pytest.raises(AgentSuspended):
+        await runtime.run(
+            "run-batch",
+            agent,
+            "write them",
+            controls=ControlPlane(pre_tool_use=ask_for("a.md", "b.md", "c.md")),
+        )
+    rounds = len(seen)
+
+    for call_id in ("c00", "c01"):
+        with pytest.raises(AgentSuspended):  # the calls nobody has answered stay parked
+            await runtime.resume("run-batch", f"approve-{call_id}", {"type": "approve"}, agent)
+    assert files.ran == [], "nothing runs until the whole round is decided"
+
+    outcome = await runtime.resume(
+        "run-batch", "approve-c02", {"type": "error", "message": "not c"}, agent
+    )
+
+    assert files.ran == ["a.md", "b.md"], "the approved calls ran; the refused one did not"
+    assert outcome.stop_reason == "aborted"
+    assert len(seen) == rounds, "the model was not asked again"
+    assert tool_returns(outcome.all_messages()) == [
+        ("c00", "wrote a.md"),
+        ("c01", "wrote b.md"),
+        ("c02", "not c"),
+    ]
 
 
 async def test_repeating_resume_reuses_the_committed_effect_result() -> None:

@@ -6,7 +6,7 @@ interrupted round from what the dead worker committed.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Collection, Sequence
+from collections.abc import AsyncGenerator, Collection, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -191,6 +191,7 @@ class AgentRuntime:
         capabilities: Sequence[AbstractCapability[Any]] = (),
         _resumed: dict[str, Resumed] | None = None,
         _regate: Collection[str] = (),
+        _cancelled: bool = False,
         **options: Any,
     ) -> Outcome:
         """Drive an attempt while the caller owns the branch lease."""
@@ -222,6 +223,7 @@ class AgentRuntime:
             inputs=_InputSession(store, execution.branch_id, token) if store else None,
             record=branch.append if branch is not None else None,
             regate=_regate,
+            cancelled=_cancelled,
         )
         # Semora's branch id is the durable coordinate every attempt shares; Pydantic AI stamps
         # each attempt with its own `run_id`, so what we hand it is the conversation.
@@ -583,9 +585,15 @@ class AgentRuntime:
         history = ModelMessagesTypeAdapter.validate_python(continuation["messages"])
         approvals: dict[str, bool | ToolApproved | ToolDenied] = {}
         resumed: dict[str, Resumed] = {}
+        cancelled = False
         for call, request in parked:
             answer = answers[call.tool_call_id]
             if answer.get("type") == "error":
+                # The refusal is that call's recorded result, so the round is complete and every
+                # call the same person approved still runs. What it is not is a prompt: the model
+                # is never asked again on a round a person refused, so it cannot call back and
+                # have the refusal re-asked without bound.
+                cancelled = True
                 approvals[call.tool_call_id] = ToolDenied(str(answer.get("message") or "denied"))
             else:
                 # An answer may carry `args`: the person approved the call with these arguments
@@ -618,6 +626,7 @@ class AgentRuntime:
             rules_version=rules_version,
             deps=deps,
             _resumed=resumed,
+            _cancelled=cancelled,
         )
         await store.write_control(
             execution.branch_id,
@@ -637,7 +646,7 @@ class AgentRuntime:
     # ── lease and transcript ──────────────────────────────────────────────────
 
     @asynccontextmanager
-    async def _lease(self, execution: ExecutionContext) -> AsyncIterator[int]:
+    async def _lease(self, execution: ExecutionContext) -> AsyncGenerator[int, None]:
         store = self._store_for(execution)
         if store is None:
             yield 0

@@ -3,6 +3,10 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
+## Unreleased
+
+- **A person's refusal ends the round instead of going back to the model.** Answering `{"type": "error", ...}` used to reach the model as that call's result, and a model that read it could call the tool again — parking the round again, and asking the same person the same question, without bound. The refusal is still the call's recorded result and every call the same round approved still runs; what no longer happens is the model request that would carry it. The outcome's `stop_reason` is `"aborted"`, the enum member that had been reserved and never produced. Calls nobody has answered keep the run parked, so a refusal in a batch never decides for the answers still outstanding. A rejection the model *should* see and route around is a `Deny` from `pre_tool_use` — a policy verdict, which is what `Deny` is for.
+
 ## 0.4.1 — 2026-09-06
 
 - **A gate can read the tool, not only the call.** `Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A permission class the host declared on the tool is read from `ctx.tool.metadata`; before, a policy that wanted one had to keep its own list of tool names beside the tools themselves and hold the two in step by hand. The field defaults to `None`, so an existing control plane is unaffected.

@@ -41,7 +41,7 @@ Provider SDKs are optional. `semora[openai]` enables Pydantic AI's OpenAI-compat
 
 - **Effect records:** completed tool calls replay their recorded results. A started but unreported effect is `Indeterminate` by default; the runtime does not guess that a retry is safe.
 - **Worker coordination:** run leases reject competing workers, and fencing rejects stale ledger writes. External services still require their own idempotency or reconciliation contract.
-- **Approval revalidation:** `Suspend` parks the run and releases the worker. `on_resume` receives the human answer and both policy-version labels before deciding whether the effect may execute.
+- **Approval revalidation:** `Suspend` parks the run and releases the worker. `on_resume` receives the human answer and both policy-version labels before deciding whether the effect may execute. A refusal ends the round instead: it is the call's recorded result, and the model is not asked again, so it cannot call back and have the same person answer the same prompt without bound.
 - **Policy composition:** `on_inputs`, `before_model`, `pre_tool_use`, `post_tool_use`, `before_finish`, `on_resume`, `on_suspend`. Gate composition makes denial take precedence over suspension.
 - **Transcript and dispatch:** `Prompt`, `Answer` and `Recover` route through durable run state. Native Pydantic AI messages are preserved.
 
