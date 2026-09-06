@@ -14,13 +14,13 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter
 from pydantic_ai import (
-    Agent,
     DeferredToolRequests,
     DeferredToolResults,
     ModelMessagesTypeAdapter,
     ToolApproved,
     ToolDenied,
 )
+from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     ModelMessage,
@@ -115,7 +115,7 @@ class AgentRuntime:
     async def run(
         self,
         branch_id: str | ExecutionContext,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         prompt: str | None = None,
         *,
         controls: Controls | None = None,
@@ -179,7 +179,7 @@ class AgentRuntime:
         self,
         execution: ExecutionContext,
         token: int,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         prompt: str | None = None,
         *,
         controls: Controls | None = None,
@@ -227,9 +227,7 @@ class AgentRuntime:
         )
         # Semora's branch id is the durable coordinate every attempt shares; Pydantic AI stamps
         # each attempt with its own `run_id`, so what we hand it is the conversation.
-        # Called on the base class on purpose: our `Agent` overrides `run` to come here.
-        result: AgentRunResult[Any] = await Agent.run(
-            agent,
+        result: AgentRunResult[Any] = await agent.run(
             prompt,
             conversation_id=conversation,
             message_history=message_history,
@@ -255,7 +253,7 @@ class AgentRuntime:
         branch_id: str | ExecutionContext,
         pending_id: str,
         answer: dict[str, Any],
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         *,
         controls: Controls | None = None,
         rules_version: str = "",
@@ -307,7 +305,7 @@ class AgentRuntime:
     async def recover(
         self,
         branch_id: str | ExecutionContext,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         history: Sequence[ModelMessage],
         *,
         controls: Controls | None = None,
@@ -368,7 +366,7 @@ class AgentRuntime:
         source: str | ExecutionContext,
         at: str | None,
         target: str | ExecutionContext,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         prompt: str | None = None,
         *,
         history: Sequence[ModelMessage] | None = None,
@@ -457,7 +455,7 @@ class AgentRuntime:
     async def dispatch(
         self,
         branch_id: str | ExecutionContext,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         command: Command,
         *,
         controls: Controls | None = None,
@@ -589,7 +587,7 @@ class AgentRuntime:
         self,
         execution: ExecutionContext,
         token: int,
-        agent: Agent[Any, Any],
+        agent: AbstractAgent[Any, Any],
         active: dict[str, Any],
         answers: dict[str, dict[str, Any]],
         parked: list[tuple[ToolCallPart, dict[str, Any]]],
