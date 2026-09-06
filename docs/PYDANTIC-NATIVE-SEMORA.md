@@ -2,190 +2,179 @@
 
 ## Goal
 
-Semora shall use Pydantic AI's public execution model directly and add only the durable guarantees
-that Pydantic AI and Pydantic AI Harness do not provide. Pydantic AI remains the owner of agents,
-messages, tool definitions, dependency injection, model calls, the agent graph, lifecycle hooks,
-guardrails, and deferred-tool result types.
+Semora uses Pydantic AI's public execution model directly and adds the application-effect
+guarantees that Pydantic AI and Pydantic AI Harness do not impose. Pydantic AI owns agents,
+messages, tool definitions, dependency injection, model calls, the agent graph, deferred tools,
+and generic durability adapters.
 
-Semora remains the owner of fail-closed external-effect recovery, lease and fencing enforcement,
-approval revalidation, atomic host-input transitions, and effect-aware branch recovery.
-
-## Decision
-
-The migration will use Pydantic AI Core immediately and place Pydantic AI Harness behind a narrow,
-optional adapter boundary.
-
-Harness 0.29 records run events, snapshots, and tool-effect states, but its tool-effect record does
-not contain the tool result needed to replay a completed external effect. Its store protocol also
-does not define Semora's lease, fencing, pending-input, or atomic transition operations. Making it
-the only source of truth now would weaken Semora's recovery contract.
-
-Semora will therefore retain its execution store until an upstream public protocol can express the
-same guarantees. Harness integration will reuse its public `StepStore` types for observation and
-continuation without making Semora depend on Harness internals.
+Semora owns fail-closed effect recovery, lease and fencing enforcement, durable approval routing,
+policy revalidation, and branch lifecycle across separate Pydantic runs.
 
 ## Ownership boundary
 
 ### Pydantic AI owns
 
-- `Agent`, `RunContext`, model messages, tool calls, tool definitions, and tool argument validation.
-- The agent graph and all model/tool invocation.
+- `Agent`, `RunContext`, model messages, tool calls, tool definitions, and argument validation.
+- The graph that performs model requests, selects tools, invokes them, and produces output.
 - Deferred execution through `ApprovalRequired`, `DeferredToolRequests`,
   `DeferredToolResults`, `ToolApproved`, and `ToolDenied`.
-- General lifecycle behavior through public hooks, capabilities, and guardrails.
+- Generic lifecycle and durable-engine integration through capabilities and
+  `BaseDurabilityCapability`.
 - Conversation, run, and tool-call identity at their native scopes.
 
-Semora must not introduce equivalent message classes, tool-call classes, dependency containers,
+Semora does not introduce equivalent message classes, tool-call classes, dependency containers,
 agent loops, or deferred-result envelopes.
 
 ### Semora owns
 
-- A result-bearing effect record written before post-tool journaling.
+- A result-bearing effect record written before post-tool policy is journaled.
 - `Indeterminate` as the default response to an intent without a committed result.
-- Explicit opt-in before retrying an indeterminate effect.
+- Explicit caller opt-in before retrying an indeterminate effect.
 - Branch leases, fencing tokens, and stale-writer rejection.
-- Durable pending inputs and atomic transitions between running, suspended, and completed states.
-- Revalidation of an approval against the current policy and its version.
+- Durable pending inputs and atomic transitions among running, suspended, and completed states.
+- Revalidation of an approval under the current policy and policy-version label.
 - Forking that preserves completed and indeterminate effect knowledge, with optional re-gating.
 - The dependency-free `semora-store` contract and its PostgreSQL implementation.
 
-## Public architecture
+## Runtime architecture
 
-The primary integration surface will be a Pydantic AI capability installed on a native
-`pydantic_ai.Agent`:
+Applications construct a native Pydantic agent and give it to `AgentRuntime`:
 
 ```python
 from pydantic_ai import Agent
-from semora import AgentRuntime, ExecutionBoundary
+from semora import AgentRuntime, MemorySteps
 
 agent = Agent(model)
-runtime = AgentRuntime(store)
-result = await runtime.run(
-    execution,
-    agent,
-    prompt,
-    capabilities=[ExecutionBoundary(policy=policy)],
-)
+runtime = AgentRuntime(MemorySteps())
+outcome = await runtime.run("branch-1", agent, "do the work")
 ```
 
-`AgentRuntime` remains the coordinator that acquires a lease and supplies durable continuation
-state. It delegates every agent step to `Agent.run`. `ExecutionBoundary` is the narrow capability
-that adds Semora's effect and revalidation contract.
+`AgentRuntime` acquires a branch lease, loads native message history, installs one
+`ExecutionBoundary`, and calls `AbstractAgent.run()`. Each resume or recovery is a new Pydantic
+run with a new `run_id`; the same `conversation_id` connects those attempts. The Semora
+`branch_id` is the durable execution coordinate across attempts.
 
-The existing `Effects` name remains a compatibility alias. Semora does not export an Agent class
-or tool decorator; applications use Pydantic AI's native construction APIs.
+`ExecutionBoundary` remains one outermost Pydantic capability. It coordinates two internal
+services:
 
-## Policy integration
+- `PolicyRunner` composes `Continue`, `Deny`, and `Suspend`, revalidates approved calls, and
+  produces the model-visible post-tool projection.
+- `EffectJournal` owns model/tool keys, `absent`/`running`/`done` transitions, committed-result
+  replay, and `Indeterminate`.
 
-General input, model, tool, and output policy belongs in Pydantic AI hooks or Harness guardrails.
-Semora will stop presenting `ControlPlane` as a general policy framework.
+These are internal collaborators rather than independently ordered capabilities. Keeping one
+outer catch boundary preserves the required order: the tool result is committed first, then
+post-tool policy runs, then its projection marker is stored. Runtime signals cross that boundary
+without becoming ordinary tool failures.
 
-Semora retains only callbacks that participate in its durable contract:
-
-- `authorize_effect` decides whether an external effect may run or must become a native deferred
-  request.
-- `revalidate_approval` receives the original request, the supplied answer, the suspended policy
-  version, and the current policy version.
-- `project_effect_result` creates the model-visible result after the original result is committed.
-- `on_suspend_committed` runs after suspension state is durable and cannot decide whether the tool
-  executes.
-
-Compatibility adapters map the old `pre_tool_use`, `on_resume`, `post_tool_use`, and `on_suspend`
-callbacks to those roles. The other old control points migrate to Pydantic hooks and are removed in
-the next major release. Pydantic's native denial and deferred-result types flow through unchanged.
+The existing `Effects` name remains an alias for `ExecutionBoundary`. Semora exports no Agent
+class or tool decorator.
 
 ## Execution flow
 
-### New run
+### Fresh tool call
 
-1. `AgentRuntime` acquires the branch lease and fencing token.
-2. Host input is admitted through the execution store.
-3. `AgentRuntime` calls native `Agent.run`, installing `ExecutionBoundary` alongside caller-supplied
-   Pydantic capabilities.
-4. Pydantic AI performs the model call and validates tool arguments.
-5. `ExecutionBoundary` checks the result-bearing effect record.
-6. A completed record returns its committed value. A running record raises `Indeterminate` unless
-   the caller explicitly allowed retry. An absent record records intent before invoking the tool.
-7. The tool result or tool error is committed before the model-visible projection is produced.
-8. Pydantic AI continues its own graph.
+1. Pydantic AI produces and validates a native `ToolCallPart`.
+2. `PolicyRunner` evaluates `pre_tool_use`. `Deny` becomes a model-visible result and `Suspend`
+   becomes Pydantic's `ApprovalRequired`.
+3. `EffectJournal` checks `tool:{tool_call_id}`.
+4. A completed record replays. A running record raises `Indeterminate` unless the caller set
+   `retry_running=True`. An absent record commits intent before calling the tool.
+5. An ordinary tool return or error is committed as the effect result.
+6. Post-tool policy runs against a copy and `after:{tool_call_id}` stores that model-visible
+   projection.
+7. Pydantic AI continues its graph with the result.
+
+An external effect is not exactly once. A crash can happen after the external service accepted a
+request and before Semora stored the result. Retrying requires an idempotency or reconciliation
+contract owned by the host and external service.
 
 ### Suspension and resume
 
-1. An authorization callback requests suspension by raising Pydantic's `ApprovalRequired` with
-   Semora metadata containing the durable pending identity and policy version.
-2. Pydantic returns `DeferredToolRequests`.
-3. `AgentRuntime` atomically stores the pending requests and releases the worker lease.
-4. `resume` records the host answer while holding a new lease.
-5. Once the whole deferred batch is answered, Semora revalidates approvals against the current
-   policy.
-6. Semora constructs native `DeferredToolResults`; Pydantic AI validates replaced arguments and
-   resumes the graph.
+1. `Suspend({"pending_id": value})` becomes `ApprovalRequired` metadata.
+2. Pydantic AI returns a native `DeferredToolRequests` batch.
+3. `AgentRuntime` stores the complete native batch in JSON-compatible form together with message
+   history, subject, policy version, and branch suspension state, then releases the worker.
+4. The host records answers by `pending_id`. A batch remains parked until every call is answered.
+5. Approved calls cross `on_resume` under the current policy. Argument replacements are the
+   native call arguments seen by that control point.
+6. `DeferredToolRequests.build_results()` validates call identity and constructs the native
+   `DeferredToolResults` supplied to the next Pydantic run.
 
-Human refusal retains Semora's explicit round-abort behavior. It is a host decision and is not sent
-back to the model as permission-policy feedback.
+New 0.5.x records use `continuation.deferred`. Semora still reads the earlier
+`continuation.calls` shape throughout 0.5.x so a deployment can resume work parked by an older
+worker. Malformed values or call IDs that differ from the active suspension fail before a tool
+runs. The legacy reader can be removed no earlier than the next major release.
+
+A human refusal retains Semora's round-abort behavior: approved siblings run, the refusal is the
+denied call's result, and the model is not called again for that round. A policy `Deny` is the path
+for a rejection the model should observe and route around.
 
 ### Recovery and fork
 
-Recovery supplies Pydantic-native message history. A completed Semora effect is replayed from its
-stored result; an incomplete intent remains indeterminate. Fork copies effect knowledge into the
-new run identity and may revalidate copied effects before replay.
+Recovery supplies Pydantic-native message history. Completed effects replay their stored result;
+incomplete intent remains indeterminate. A fork copies effect knowledge into a new Semora branch
+and can ask the new branch's policy to re-gate copied records.
 
-Harness `continue_run` and `fork_run` may supply snapshot history through an adapter, but they do
-not replace the effect-copy or lease rules.
+Tool-call identity belongs to one Pydantic run. Cross-run business identity belongs to the host;
+the host must supply its own stable key when an operation must deduplicate across branches or
+conversations.
 
-## Harness adapter
+## Composing Pydantic capabilities
 
-The adapter is optional and imports `pydantic-ai-harness` only when installed. It has two jobs:
+Every runtime entry accepts `capabilities=` and installs caller capabilities beside Semora's
+outermost boundary. Tests cover a public `BaseDurabilityCapability` implementation and Harness
+`StepPersistence`.
 
-1. expose a Semora execution as Harness run metadata and snapshots;
-2. translate a Harness continuation snapshot into native `message_history` accepted by
-   `AgentRuntime`.
+`StepPersistence` records Pydantic run events, snapshots, and tool-effect status. It is useful for
+observing or continuing a Pydantic run, but its documented contract does not restore arbitrary
+capability state or automatically deduplicate external side effects. A Harness `run_id` remains
+one `Agent.run()` identity and is deliberately different from Semora's `branch_id`.
 
-The adapter never treats Harness `completed` as proof that a result value is replayable. Semora's
-result-bearing effect record remains authoritative for that decision. Harness and Semora run IDs
-must be mapped explicitly because Pydantic run identity is per `Agent.run`, while a Semora branch
-can span multiple attempts.
+Semora's ledger remains authoritative for result-bearing replay, approval routing, worker leases,
+fencing, and fail-closed ambiguity. Harness stays a development dependency; `semora-store` has no
+Pydantic or Harness dependency.
 
-No code may import Harness private modules such as `_capability`, `_store`, or `_types`.
+## Why Semora is not a Pydantic durable backend yet
 
-## Migration status
+Pydantic's public backend builder passes an operation ID, operation name, async body, engine
+configuration, and an opaque `cache_key`. In Pydantic AI 2.40 that cache key contains live
+`RunContext`, model, tool, and function objects for relevant operations. It is not a stable,
+generic JSON identity. Depending on tuple positions, hashing `repr()`, or serializing live
+functions could associate a replay with the wrong application effect after an upgrade or process
+change.
 
-`ExecutionBoundary` is the public capability, and `AgentRuntime` delegates through Pydantic AI's
-public `AbstractAgent.run()` interface. The former `semora.Agent`, `semora.tool`, class-body tool
-discovery, implicit branch binding, and implicit policy discovery have been removed. General
-policy should use Pydantic capabilities, hooks, or Harness guardrails; the remaining Semora
-control points participate in its durable contract.
+A production `SemoraDurability(BaseDurabilityCapability)` becomes safe when either:
 
-Optional Harness snapshot interop and a PostgreSQL `StepStore` remain separate future integrations.
-They must not duplicate Semora effect rows or weaken result-bearing replay.
+1. Pydantic exposes a stable, serializable per-invocation identity to the backend; or
+2. Semora adds a transactional operation cursor that resumes from a committed transcript
+   frontier without renumbering operations.
 
-Every public API change updates `docs/API.md` and the migration guide. Deprecations include a
-replacement example and remain for one minor release before removal unless maintaining them would
-break the execution guarantee.
+Until one condition holds, Semora composes with Pydantic durability capabilities through
+`AgentRuntime(capabilities=[capability])`. It does not inspect Pydantic private tuple layouts or
+claim a generic durable backend it cannot identify safely.
+
+## Policy integration
+
+General input, model, tool, and output policy belongs in Pydantic capabilities, hooks, or Harness
+guardrails. `ControlPlane` remains for decisions coupled to Semora's durable contract:
+
+- `pre_tool_use` authorizes, denies, or durably suspends an effect;
+- `on_resume` revalidates an approved call;
+- `post_tool_use` projects a committed result and is journaled per call;
+- `on_suspend` observes the complete batch before the durable park is announced;
+- the input/model/finish controls participate in Semora's durable input and transcript flow.
+
+Applications reconstruct executable controls and other capabilities in a replacement process.
+Semora persists native messages and decisions, never Python callables.
 
 ## Testing
 
-Behavior tests remain the authority for Semora guarantees. The migration adds tests that prove:
+Behavior tests are the authority for Semora guarantees. They prove native deferred serialization,
+0.5.x continuation compatibility, approval argument replacement, result replay, unresolved-effect
+failure, Pydantic capability composition, Harness observation, lease/fencing behavior, and store
+layer independence.
 
-- a native `pydantic_ai.Agent` uses `ExecutionBoundary` without `semora.Agent`;
-- Pydantic deferred request/result types are preserved end to end;
-- completed effects replay their committed result and incomplete effects fail closed;
-- approval revalidation sees both policy versions and replaced arguments;
-- caller-supplied Pydantic hooks and capabilities compose with Semora;
-- Harness is optional at import time;
-- the Harness adapter continues from snapshot messages without treating effect status as a stored
-  result;
-- memory and PostgreSQL stores pass the same lease, fencing, transition, and replay contract.
-
-The full project checks remain `ruff check`, `ruff format --check`, `mypy`, `pytest`, and
+The full checks are `ruff check`, `ruff format --check`, `mypy`, `pytest`, and
 `uv build --all-packages`. PostgreSQL conformance requires `SEMORA_TEST_DSN` and is reported
 separately when unavailable.
-
-## Non-goals
-
-- Semora will not provide another agent loop or model abstraction.
-- Semora will not wrap every Pydantic hook or guardrail behind its own vocabulary.
-- Semora will not claim exactly-once external effects.
-- Semora will not silently retry an incomplete effect.
-- Semora will not depend on Harness private APIs or make Harness 0.x the authority for result
-  replay.

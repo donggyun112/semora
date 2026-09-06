@@ -75,6 +75,14 @@ Approval updates and finalization hold the run lease; concurrent `resume` calls 
 
 `Outcome` exposes `output`, `stop_reason`, optional native `result`, `pending`, `pending_id`, `suspended`, and `all_messages()`. A runtime-level park is raised as `AgentSuspended`, carrying `pending_id`, `tool_call_id` and ordered `pending` pairs.
 
+The active suspension stores the complete native `DeferredToolRequests` value as JSON-compatible
+data under `continuation.deferred`. Resume validates that value and the active call-ID list, then
+uses `DeferredToolRequests.build_results()` to construct the next run's input. The reader also
+accepts the earlier 0.5.x `continuation.calls` representation so a new worker can resume work
+parked during a rolling upgrade. New writes use only `continuation.deferred`; malformed or
+mismatched stored requests raise before the agent resumes. The legacy reader remains throughout
+0.5.x and may be removed in the next major release.
+
 Use `{"type": "approve"}` for approval, `{"type": "approve", "args": {...}}` to approve with replaced arguments, and `{"type": "error", "message": "declined"}` for refusal. Replaced arguments are validated by Pydantic AI and are what `on_resume` sees as the call; the original request stays in `ResumeInput.request`. Policy-version strings are host-provided labels.
 
 A refusal is not routed through `on_resume` and cannot be lifted there. It ends the round: the outcome's `stop_reason` is `"aborted"`, the refusal message is that call's recorded result, every call the same round approved still runs, and the model is not asked again — handed a refusal it would call the tool again and the same person would answer the same prompt, without bound. Calls in the round that nobody has answered yet keep the run parked; only the answer that completes the round ends it. A host that wants the model to see a rejection and try something else expresses that as a `Deny` from `pre_tool_use`, which is a policy verdict rather than a person's.
@@ -105,10 +113,23 @@ Use Pydantic AI capabilities and hooks, or Harness guardrails, for general input
 
 `ExecutionBoundary(store, branch_id, token=0, *, controls=None, retry_running=False, rules_version="", subject="", resumed=None, inputs=None, record=None)` is the capability the runtime installs per attempt. `Effects` is a compatibility alias for the same class. Prefer `AgentRuntime` so lease and continuation ownership stay centralized.
 
+The runtime places this boundary outermost and then installs caller-supplied Pydantic
+`capabilities=` inside it. Public Pydantic durability capabilities and Harness `StepPersistence`
+can observe or durably wrap their own operations without replacing Semora's result-bearing effect
+record, approval routing, lease, or fencing rules. A Pydantic `run_id` identifies one
+`Agent.run()` call; a Semora `branch_id` spans its run, resume, and recovery attempts.
+
 - `tool:{call_id}` stores the original effect result envelope. Ordinary tool exceptions produce committed error results. `ControlSignal`, ledger signals and cancellation propagate.
 - `after:{call_id}` stores the completed model-visible journal projection separately. Recovery reuses that projection without leaking the unredacted original. A journal can execute again if the process dies before committing its projection: external journal effects must be idempotent.
 - `running` without a result is indeterminate. Fencing protects ledger writes, not arbitrary external APIs. A forced retry needs the host's idempotency/reconciliation contract.
 - Run-scoped keys do not deduplicate a business operation across runs. The console supplies stable request/customer keys for its simulated payment separately.
 - `MemorySteps` and `MemoryTranscript` do not survive a process restart. PostgreSQL adapters use an async psycopg pool and share the same protocols; see the conformance tests for setup and behavior.
+
+Semora does not currently provide a `BaseDurabilityCapability` backend. Pydantic's backend
+`cache_key` is an opaque tuple containing live runtime objects for relevant operations, so Semora
+does not derive durable identity from tuple positions or `repr()`. Such a backend requires a
+stable serializable invocation identity from Pydantic or a Semora-owned transactional operation
+cursor. Compose existing durability capabilities through `AgentRuntime(capabilities=[capability])` in
+the meantime.
 
 `Contended` means another worker holds the run lease. `Fenced` means a stale writer's token was rejected. `Indeterminate` includes `branch_id` and `step`. `InvalidTransition` (from `semora.dispatch`) carries the observed `state` and rejected `command`. Do not convert these signals into ordinary tool errors in host adapters.

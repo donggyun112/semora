@@ -45,6 +45,19 @@ An `AgentSuspended` exception is the durable park signal. Route its `pending_id`
 call `runtime.resume(...)` when an answer arrives. Semora no longer converts that signal into a
 special run-bound Agent outcome.
 
+## Keep in-flight 0.5.x suspensions during deployment
+
+New workers persist the complete Pydantic `DeferredToolRequests` value under
+`continuation.deferred`. When the last host answer arrives, Semora reloads it and calls
+`DeferredToolRequests.build_results()`. Pydantic therefore validates the approval call IDs and
+applies `ToolApproved.override_args` when it creates the next run's `DeferredToolResults`.
+
+Workers on this release also read the earlier 0.5.x `continuation.calls` representation. A rolling
+upgrade does not require abandoning or rewriting already parked branches. New writes use the
+native representation, and corrupted data or call IDs that disagree with the active suspension
+fail before tool execution. Keep the compatibility reader for the rest of 0.5.x; its removal is a
+next-major migration.
+
 ## Direct capability use
 
 A host that owns leases and continuation storage can install the boundary on a native run:
@@ -90,6 +103,11 @@ await runtime.recover(
 The same rule applies to model settings, usage limits, toolsets, and other Pydantic run options.
 `run`, `resume`, and `recover` forward them to the native `Agent.run` attempt. `fork` and `dispatch`
 accept them through `**options`.
+
+This includes Pydantic's public durability capabilities and Harness `StepPersistence`. They
+record or wrap Pydantic operations while Semora retains result-bearing effect replay, approval
+routing, leases, and fencing. Their per-`Agent.run()` `run_id` is separate from the Semora
+`branch_id` that spans attempts.
 
 ## Move general policy to Pydantic
 

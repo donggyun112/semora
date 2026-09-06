@@ -11,6 +11,14 @@ documentation corrections belong in the commit log, not here.
   `ControlPlane` to `AgentRuntime`.
 - `AgentRuntime` accepts Pydantic AI's public `AbstractAgent` interface and calls its public
   `run()` method, so upstream `WrapperAgent` and Harness behavior is preserved.
+- Suspensions now persist the complete JSON-compatible `DeferredToolRequests` value and resume
+  through `DeferredToolRequests.build_results()`, so Pydantic validates answered call IDs and
+  applies approved argument replacements. Continuations written by earlier 0.5.x workers using
+  `continuation.calls` remain readable; malformed or mismatched stored requests fail before tool
+  execution.
+- Caller-supplied capabilities are verified with Pydantic AI's public durable-backend surface and
+  Harness `StepPersistence`. Pydantic run identity remains separate from Semora branch identity,
+  and Semora's result-bearing record remains authoritative for effect replay.
 
 ## 0.5.0 — 2026-09-06
 
