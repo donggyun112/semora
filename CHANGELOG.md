@@ -3,7 +3,7 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
-## Unreleased
+## 0.4.1 — 2026-09-06
 
 - **A gate can read the tool, not only the call.** `Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A permission class the host declared on the tool is read from `ctx.tool.metadata`; before, a policy that wanted one had to keep its own list of tool names beside the tools themselves and hold the two in step by hand. The field defaults to `None`, so an existing control plane is unaffected.
 - `Ctx.run` is Pydantic AI's own `RunContext` at every control point the agent loop reaches, `None` only at `on_suspend`. The other `Ctx` fields are lifted out of it for the common case; this is the rest, and it is what native helpers take, so a gate selects tools with `matches_tool_selector(selector, ctx.run, ctx.tool)` instead of a matching rule of its own.
