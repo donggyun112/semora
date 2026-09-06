@@ -13,7 +13,16 @@ from pydantic_ai import RunContext
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import FunctionToolset
-from semora import Agent, AgentRuntime, ControlPlane, MemorySteps, Outcome, Prompt, tool
+from semora import (
+    CONCURRENCY_SAFE,
+    Agent,
+    AgentRuntime,
+    ControlPlane,
+    MemorySteps,
+    Outcome,
+    Prompt,
+    tool,
+)
 from semora.controls import (
     Continue,
     Ctx,
@@ -257,6 +266,26 @@ async def test_a_composed_control_can_be_a_class_attribute() -> None:
     outcome = await agent.run("clear .env")
 
     assert agent.touched == [] and outcome.output == "done"
+
+
+def test_tool_metadata_reaches_the_gate_beside_the_concurrency_mark() -> None:
+    """A host's own declaration about a tool travels with it; `concurrency_safe` joins it."""
+
+    class Marked(Reviewer):
+        @tool(metadata={"permission": "read"}, concurrency_safe=True)
+        async def peek(self, path: str) -> str:
+            """Look, without touching anything."""
+            return "ok"
+
+        @tool
+        async def plain(self) -> str:
+            """Nothing declared."""
+            return "ok"
+
+    tools = {t.name: t for t in Marked(Path("/repo"), [])._marked_tools()}
+
+    assert tools["peek"].metadata == {"permission": "read", CONCURRENCY_SAFE: True}
+    assert tools["plain"].metadata is None
 
 
 def test_uses_refuses_what_it_cannot_place() -> None:

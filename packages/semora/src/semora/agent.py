@@ -78,6 +78,7 @@ def tool[F: Callable[..., Any]](
     requires_approval: bool = ...,
     name: str | None = ...,
     description: str | None = ...,
+    metadata: dict[str, Any] | None = ...,
 ) -> Callable[[F], F]: ...
 def tool[F: Callable[..., Any]](
     function: F | None = None,
@@ -87,11 +88,16 @@ def tool[F: Callable[..., Any]](
     requires_approval: bool = False,
     name: str | None = None,
     description: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> F | Callable[[F], F]:
     """Mark a method as one of the agent's tools.
 
     `concurrency_safe=True` says order cannot matter, so the call may run beside others; without
     it the call is a barrier and the round runs in model order.
+
+    `metadata` is the host's own declaration about the tool — a permission class, an owning team —
+    carried to `ctx.tool.metadata` at the tool control points. `concurrency_safe` writes its own
+    key into it, so a host key must not collide with `CONCURRENCY_SAFE`.
     """
 
     def mark(fn: F) -> F:
@@ -99,7 +105,11 @@ def tool[F: Callable[..., Any]](
             fn,
             _MARK,
             {
-                "metadata": {CONCURRENCY_SAFE: True} if concurrency_safe else None,
+                "metadata": {
+                    **(metadata or {}),
+                    **({CONCURRENCY_SAFE: True} if concurrency_safe else {}),
+                }
+                or None,
                 "requires_approval": requires_approval,
                 "name": name,
                 "description": description,

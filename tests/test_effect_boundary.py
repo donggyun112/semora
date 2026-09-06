@@ -3,7 +3,7 @@
 from typing import Any
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, Tool
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -14,7 +14,8 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
-from semora import AgentRuntime, ControlPlane, ControlSignal, Ctx, MemorySteps
+from pydantic_ai.tools import ToolDefinition
+from semora import AgentRuntime, Continue, ControlPlane, ControlSignal, Ctx, Halt, MemorySteps
 
 
 def history() -> list[ModelMessage]:
@@ -82,3 +83,33 @@ async def test_recovery_replays_redacted_result_without_repeating_journal(
         "ok": True,
         "value": {"text": "123-45-6789"},
     }
+
+
+async def test_the_tool_control_points_see_the_tool_definition() -> None:
+    """A permission class lives on the tool, not on the call: the gate must be able to read it."""
+    seen: dict[str, ToolDefinition | None] = {}
+
+    async def read() -> str:
+        return "ok"
+
+    async def gate(ctx: Ctx, call: ToolCallPart) -> Continue:
+        seen["pre_tool_use"] = ctx.tool
+        return Continue()
+
+    async def journal(ctx: Ctx, call: ToolCallPart, result: Any) -> None:
+        seen["post_tool_use"] = ctx.tool
+
+    async def finish(ctx: Ctx, reason: str) -> Halt:
+        seen["before_finish"] = ctx.tool
+        return Halt("completed")
+
+    controls = ControlPlane(pre_tool_use=gate, post_tool_use=journal, before_finish=finish)
+    agent = Agent(FunctionModel(answer), tools=[Tool(read, metadata={"permission": "read"})])
+    await AgentRuntime(MemorySteps()).recover("defs", agent, history(), controls=controls)
+
+    for point in ("pre_tool_use", "post_tool_use"):
+        definition = seen[point]
+        assert definition is not None, point
+        assert definition.name == "read"
+        assert (definition.metadata or {})["permission"] == "read"
+    assert seen["before_finish"] is None, "no tool is being decided at a turn-level point"

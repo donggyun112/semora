@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from pydantic_ai.messages import ModelMessage, ModelRequestPart
+from pydantic_ai.tools import ToolDefinition
 
 from .contracts import PendingInput, StopReason, ToolCall
 
@@ -48,6 +49,14 @@ class Ctx:
     """Assistant text of the current round."""
     subject: str = ""
     """Who the run acts for, as the host names them, carried verbatim and never interpreted."""
+    tool: ToolDefinition | None = None
+    """The definition behind the call, at `pre_tool_use`, `on_resume` and `post_tool_use`.
+
+    `None` at every other control point, `on_suspend` included: that one is reached from the
+    runtime, after the attempt released the tool. A permission class the host declared as tool
+    metadata is read from here, because a call carries a name and arguments but never the tool's
+    own declaration.
+    """
 
 
 class Continue(NamedTuple):

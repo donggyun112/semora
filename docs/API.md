@@ -90,7 +90,7 @@ Subclass `semora.Agent`; this is a Pydantic AI Agent subclass with run-bound con
 | `store`, `transcript` | Shared instance or a factory resolved once per subclass |
 | Seven control-point methods | Default policies, overridden by an explicit controls object |
 
-`@tool` also accepts `concurrency_safe=False`, `requires_approval=False`, `name=None`, and `description=None`. A `requires_approval=True` tool parks through the `pre_tool_use` gate like a `Suspend`, with the call's `tool_call_id` as its `pending_id`; a gate's `Deny` still wins, and `on_resume` re-decides the answer.
+`@tool` also accepts `concurrency_safe=False`, `requires_approval=False`, `name=None`, `description=None`, and `metadata=None`. `metadata` is the host's own declaration about the tool, reaching `ctx.tool.metadata` at the tool control points; `concurrency_safe=True` writes `CONCURRENCY_SAFE` into the same mapping, so a host key must not use that name. A `requires_approval=True` tool parks through the `pre_tool_use` gate like a `Suspend`, with the call's `tool_call_id` as its `pending_id`; a gate's `Deny` still wins, and `on_resume` re-decides the answer.
 
 Construct with `branch_id=None`, `runtime=None`, and supported configuration overrides. An instance binds to one branch; changing its id or overlapping attempts raises `RuntimeError`. `run(prompt=None, ...)` mints a branch id if needed. `resume(answer, pending_id=None, ...)` defaults to the first pending request. `recover(history=None, ...)` loads committed history when omitted. `fork(source, at=None, prompt=None, *, history=None, regate=False, ...)` makes this instance's branch a fork of another. `dispatch(command, ...)`, `submit(item, ...)`, `state()` and `pending()` operate on that instance's branch. `last` holds the last outcome. Pydantic AI's `run_sync(prompt, run_id=...)` is inherited unchanged: its `run_id` is the loop's, so bind the branch in the constructor.
 
@@ -98,7 +98,9 @@ Instance fields are not automatically durable. Restore trusted tool configuratio
 
 ## Control points
 
-`ControlPlane` accepts any subset of these async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, and `subject`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
+`ControlPlane` accepts any subset of these async functions. `Ctx` contains `turn`, native `messages`, `calls_made`, `text`, `subject`, and `tool`. A tool call is a native `ToolCallPart`: access `tool_name`, `tool_call_id`, `args_as_dict()`.
+
+`Ctx.tool` is the native `ToolDefinition` behind the call at `pre_tool_use`, `on_resume` and `post_tool_use`, and `None` at every other point, `on_suspend` included. A call carries a name and arguments but never the tool's own declaration, so a permission class the host attached as tool metadata — `@tool(metadata={"permission": "read"})`, or `Tool(fn, metadata=...)` for an implementation written elsewhere — is read from `ctx.tool.metadata` and nowhere else.
 
 | Point | Signature | Composition |
 |---|---|---|

@@ -412,7 +412,7 @@ class Effects(AbstractCapability[Any]):
         args: Any,
     ) -> Any:
         """Ask the gate. A denial is a result the model sees; a suspension parks first."""
-        here = self._ctx(ctx)
+        here = self._ctx(ctx, tool=tool_def)
         decision: ToolDecision
         if call.tool_call_id not in self.regate and await self._recorded(call):
             # The effect happened. No gate can undo it, and asking a person to approve it would
@@ -495,7 +495,7 @@ class Effects(AbstractCapability[Any]):
                 if not await self.store.start(self.branch_id, key, self.token):
                     raise Indeterminate(self.branch_id, key)
                 step = await self._execute(key, args, handler)
-        record = await self._journal_once(ctx, call, step.value)
+        record = await self._journal_once(ctx, call, tool_def, step.value)
         if record["ok"]:
             return record["value"]
         raise ToolFailed(record["error"])
@@ -521,7 +521,11 @@ class Effects(AbstractCapability[Any]):
         return Step("done", record)
 
     async def _journal_once(
-        self, ctx: RunContext[Any], call: ToolCallPart, record: dict[str, Any]
+        self,
+        ctx: RunContext[Any],
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        record: dict[str, Any],
     ) -> dict[str, Any]:
         """Replay the model-visible projection, or journal a copy of the effect result.
 
@@ -544,7 +548,7 @@ class Effects(AbstractCapability[Any]):
             if projected["ok"]
             else {"type": "error", "message": projected["error"]}
         )
-        await self.controls.post_tool_use(self._ctx(ctx), call, result)
+        await self.controls.post_tool_use(self._ctx(ctx, tool=tool_def), call, result)
         if self.store is not None:
             await self.store.write_control(
                 self.branch_id, key, {"hooked": True, "record": projected}, self.token
@@ -553,7 +557,13 @@ class Effects(AbstractCapability[Any]):
 
     # ── context ───────────────────────────────────────────────────────────────
 
-    def _ctx(self, ctx: RunContext[Any], *, pending: list[ModelMessage] | None = None) -> Ctx:
+    def _ctx(
+        self,
+        ctx: RunContext[Any],
+        *,
+        pending: list[ModelMessage] | None = None,
+        tool: ToolDefinition | None = None,
+    ) -> Ctx:
         messages = [*ctx.messages, *(pending or [])]
         return Ctx(
             turn=ctx.run_step,
@@ -561,6 +571,7 @@ class Effects(AbstractCapability[Any]):
             calls_made=list(self.calls_made),
             text=_last_text(messages),
             subject=self.subject,
+            tool=tool,
         )
 
     def _made(self, call: ToolCallPart, *, refused: bool) -> None:
