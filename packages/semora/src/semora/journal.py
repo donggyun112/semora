@@ -90,10 +90,11 @@ class EffectJournal:
             return _RESPONSE.validate_python(step.value["response"])
         if step.status == "running":
             if not self.retry_running:
-                raise Indeterminate(self.branch_id, key)
+                raise Indeterminate(self.branch_id, key, step.version)
             await self.store.forget(self.branch_id, key, self.token)
         if not await self.store.start(self.branch_id, key, self.token):
-            raise Indeterminate(self.branch_id, key)
+            current = await self.store.read(self.branch_id, key)
+            raise Indeterminate(self.branch_id, key, current.version)
         try:
             response = await handler(request)
         except asyncio.CancelledError:
@@ -124,10 +125,11 @@ class EffectJournal:
             return cast(dict[str, Any], step.value)
         if step.status == "running":
             if not self.retry_running:
-                raise Indeterminate(self.branch_id, key)
+                raise Indeterminate(self.branch_id, key, step.version)
             await self.store.forget(self.branch_id, key, self.token)
         if not await self.store.start(self.branch_id, key, self.token):
-            raise Indeterminate(self.branch_id, key)
+            current = await self.store.read(self.branch_id, key)
+            raise Indeterminate(self.branch_id, key, current.version)
         return await self._execute(key, args, handler)
 
     async def _execute(

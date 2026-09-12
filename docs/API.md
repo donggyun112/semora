@@ -11,6 +11,7 @@ from semora import (
     AgentRuntime,
     AgentSuspended,
     Answer,
+    ConfirmedEffect,
     Continue,
     ControlPlane,
     ControlSignal,
@@ -31,9 +32,11 @@ from semora import (
     Prompt,
     Recover,
     ResumeInput,
+    RetryEffect,
     Steering,
     Suspend,
     Suspending,
+    UnresolvedEffect,
     gate,
     new_branch_id,
     writer,
@@ -41,6 +44,7 @@ from semora import (
 from semora_store import (
     Contended,
     ConversationScopedSteps,
+    EffectResolution,
     ExecutionContext,
     ExecutionStore,
     Fenced,
@@ -59,15 +63,45 @@ All methods below are async. `branch_id` accepts a string or `ExecutionContext`.
 |---|---|
 | `run(branch_id, agent, prompt=None, *, controls=None, rules_version="", prompt_id=None, conversation_id=None, message_history=None, deferred_tool_results=None, deps=None, capabilities=(), **options)` | `Outcome`; `agent` implements Pydantic AI's public `AbstractAgent` interface. Extra model/run options reach that agent. Acquires and renews a run lease. |
 | `resume(branch_id, pending_id, answer, agent, *, controls=None, rules_version="", deps=None, capabilities=(), **options)` | Records an answer, then revalidates when all parked calls are answered. Caller-supplied Pydantic capabilities and run options reach the resumed attempt. Unanswered siblings raise `AgentSuspended` again. Unknown pending IDs raise `LookupError`. |
-| `recover(branch_id, agent, history, *, controls=None, rules_version="", conversation_id=None, deps=None, capabilities=(), **options)` | Continues from native message history with caller-supplied Pydantic capabilities and run options. Reuses committed effects; unreported effects raise `Indeterminate` unless retry was explicitly enabled. |
-| `fork(source, at, target, agent, prompt=None, *, history=None, regate=False, controls=None, rules_version="", source_conversation_id=None, conversation_id=None, deps=None, **options)` | Starts `target` from `source`'s transcript at entry uuid `at` (`None`: the active tip), or from `history` when the host keeps its own coordinates. Effects the source finished in that history are copied to the new run's ledger and replay; `regate=True` asks the new run's `pre_tool_use` about each first, and only `Continue` replays. A call the source started and never reported is copied as started, so `retry_running` decides. The rest runs under the new run's policy. The source is never written. |
+| `recover(branch_id, agent, history, *, controls=None, rules_version="", conversation_id=None, deps=None, capabilities=(), **options)` | Continues from native message history with caller-supplied Pydantic capabilities and run options. Reuses committed effects; unreported effects raise `Indeterminate` unless that effect was explicitly resolved or retry was enabled. |
+| `fork(source, at, target, agent, prompt=None, *, history=None, regate=False, controls=None, rules_version="", source_conversation_id=None, conversation_id=None, deps=None, **options)` | Starts `target` from `source`'s transcript at entry uuid `at` (`None`: the active tip), or from `history` when the host keeps its own coordinates. Effects the source finished in that history are copied to the new run's ledger and replay; `regate=True` asks the new run's `pre_tool_use` about each first, and only `Continue` replays. A call the source started and never reported is copied as started. A source-only retry grant is also copied as doubt, not authority. The rest runs under the new run's policy. The source is never written. |
 | `committed_history(branch_id, conversation_id=None)` | `list[ModelMessage]`; requires a transcript. Supply this to `recover`. |
 | `submit(branch_id, item)` | Enqueues and returns a `PendingInput`; requires an execution store. |
+| `unresolved_effects(branch_id, conversation_id=None)` | Returns `UnresolvedEffect(call_id, tool_name, args, version)` records from the latest round that need provider reconciliation. Reading grants no retry authority. |
+| `resolve_effect(branch_id, call_id, resolution, *, workers_stopped, conversation_id=None)` | Atomically applies a `ConfirmedEffect` or `RetryEffect` under the branch lease. The decision is bound to `expected_version` and idempotent by `decision_id`. Call `recover` afterward. |
 | `dispatch(branch_id, agent, command, *, controls=None, **options)` | Routes `Prompt`, `Answer`, or `Recover` using durable state. Attach both ledger and transcript. |
 | `pending(branch_id)` | Undecided `(pending_id, tool_call_id)` pairs in model order. |
 | `state(branch_id)` | `fresh`, `interrupted`, `completed`, or suspension state `waiting`/`resuming`; without a transcript an unparked run is `idle`. |
 
 `interrupted` includes a still-running worker. Only acquiring the lease distinguishes it from a dead one.
+
+An indeterminate tool call is reconciled outside the model loop:
+
+```python
+from semora import ConfirmedEffect
+
+pending = (await runtime.unresolved_effects("branch-1"))[0]
+await runtime.resolve_effect(
+    "branch-1",
+    pending.call_id,
+    ConfirmedEffect(
+        decision_id="provider-receipt-42",
+        expected_version=pending.version,
+        reason="provider returned receipt 42",
+        result={"receipt_id": 42},
+        provider_key="charge-order-7",
+    ),
+    workers_stopped=True,
+)
+```
+
+Use `RetryEffect` only after the provider confirms the request was not accepted, or when the
+provider's stable idempotency contract makes another dispatch safe. `workers_stopped=True` is a
+host assertion covering both the old worker and its outstanding request; acquiring Semora's lease
+only fences later ledger writes and cannot cancel an external API call. Re-delivering the same
+`decision_id` with identical parameters is absorbed. Reusing it with different parameters, or
+resolving a stale `expected_version`, raises `EffectConflict`. A confirmed result is committed as
+the call's ordinary tool-result envelope and is supplied to Pydantic AI by the next `recover`.
 
 Each `run`, `resume`, or `recover` is a fresh Pydantic AI attempt. Reconstruct and pass security-sensitive capabilities on every entry from a replacement process. Semora deliberately persists data and decisions, never executable capability objects. `fork` and `dispatch` accept capabilities through their Pydantic `**options` passthrough.
 
@@ -121,7 +155,8 @@ record, approval routing, lease, or fencing rules. A Pydantic `run_id` identifie
 
 - `tool:{call_id}` stores the original effect result envelope. Ordinary tool exceptions produce committed error results. `ControlSignal`, ledger signals and cancellation propagate.
 - `after:{call_id}` stores the completed model-visible journal projection separately. Recovery reuses that projection without leaking the unredacted original. A journal can execute again if the process dies before committing its projection: external journal effects must be idempotent.
-- `running` without a result is indeterminate. Fencing protects ledger writes, not arbitrary external APIs. A forced retry needs the host's idempotency/reconciliation contract.
+- `running` without a result is indeterminate. `ready` means one provider-backed retry was granted; claiming it moves the same effect back to `running`. `Step.version` prevents a stale observation from deciding a later attempt. Fencing protects ledger writes, not arbitrary external APIs.
+- `ExecutionStore.resolve_effect` persists the decision and state transition atomically. `EffectResolution` is its dependency-free, opaque-value contract; applications normally use `AgentRuntime.resolve_effect` with `ConfirmedEffect` or `RetryEffect`.
 - Run-scoped keys do not deduplicate a business operation across runs. The console supplies stable request/customer keys for its simulated payment separately.
 - `MemorySteps` and `MemoryTranscript` do not survive a process restart. PostgreSQL adapters use an async psycopg pool and share the same protocols; see the conformance tests for setup and behavior.
 
@@ -132,4 +167,4 @@ stable serializable invocation identity from Pydantic or a Semora-owned transact
 cursor. Compose existing durability capabilities through the `capabilities=[capability]` argument
 on `AgentRuntime.run()`, `resume()`, and `recover()` in the meantime.
 
-`Contended` means another worker holds the run lease. `Fenced` means a stale writer's token was rejected. `Indeterminate` includes `branch_id` and `step`. `InvalidTransition` (from `semora.dispatch`) carries the observed `state` and rejected `command`. Do not convert these signals into ordinary tool errors in host adapters.
+`Contended` means another worker holds the run lease. `Fenced` means a stale writer's token was rejected. `Indeterminate` includes `branch_id`, `step`, and the observed `version`. `InvalidTransition` (from `semora.dispatch`) carries the observed `state` and rejected `command`. Do not convert these signals into ordinary tool errors in host adapters.

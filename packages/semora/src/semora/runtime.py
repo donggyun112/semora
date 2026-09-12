@@ -6,7 +6,7 @@ interrupted round from what the dead worker committed.
 """
 
 import asyncio
-from collections.abc import AsyncGenerator, Collection, Sequence
+from collections.abc import AsyncGenerator, Collection, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Any
@@ -34,13 +34,22 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_core import to_jsonable_python
 from semora_store import (
     Contended,
+    EffectResolution,
     ExecutionContext,
     ExecutionStore,
     ExecutionTransition,
+    Step,
     Transcript,
 )
 
-from .contracts import AgentSuspended, PendingInput, StopReason
+from .contracts import (
+    AgentSuspended,
+    ConfirmedEffect,
+    PendingInput,
+    RetryEffect,
+    StopReason,
+    UnresolvedEffect,
+)
 from .controls import Controls, Ctx
 from .dispatch import Command, default_router
 from .effects import PENDING_ROUND, ExecutionBoundary, Resumed
@@ -451,6 +460,79 @@ class AgentRuntime:
             execution.branch_id, normalized.origin_id, _encode(normalized)
         )
         return normalized
+
+    async def unresolved_effects(
+        self,
+        branch_id: str | ExecutionContext,
+        conversation_id: str | None = None,
+    ) -> list[UnresolvedEffect]:
+        """List the latest round's tool effects that still need external reconciliation."""
+        execution = _execution_context(branch_id, conversation_id)
+        store = self._require_store(execution)
+        pending = await store.read(execution.branch_id, PENDING_ROUND)
+        if pending.status != "done" or not isinstance(pending.value, Mapping):
+            return []
+        calls = pending.value.get("calls")
+        if not isinstance(calls, list):
+            return []
+        unresolved: list[UnresolvedEffect] = []
+        for item in calls:
+            if not isinstance(item, Mapping):
+                continue
+            call_id = item.get("id")
+            tool_name = item.get("name")
+            args = item.get("args")
+            if not isinstance(call_id, str) or not isinstance(tool_name, str):
+                continue
+            record = await store.read(execution.branch_id, step_key(call_id))
+            if record.status == "running":
+                unresolved.append(
+                    UnresolvedEffect(
+                        call_id,
+                        tool_name,
+                        dict(args) if isinstance(args, Mapping) else {},
+                        record.version,
+                    )
+                )
+        return unresolved
+
+    async def resolve_effect(
+        self,
+        branch_id: str | ExecutionContext,
+        call_id: str,
+        resolution: ConfirmedEffect | RetryEffect,
+        *,
+        workers_stopped: bool,
+        conversation_id: str | None = None,
+    ) -> Step:
+        """Commit one trusted provider decision for an indeterminate tool call.
+
+        This changes durable effect authority only. Call ``recover`` afterward to replay a
+        confirmed result or execute a retry. ``workers_stopped`` asserts that the old worker and
+        its outstanding provider request cannot later create a conflicting effect.
+        """
+        execution = _execution_context(branch_id, conversation_id)
+        store = self._require_store(execution)
+        decision = EffectResolution(
+            action="complete" if isinstance(resolution, ConfirmedEffect) else "retry",
+            decision_id=resolution.decision_id,
+            expected_version=resolution.expected_version,
+            reason=resolution.reason,
+            value=(
+                {"ok": True, "value": resolution.result}
+                if isinstance(resolution, ConfirmedEffect)
+                else None
+            ),
+            provider_key=resolution.provider_key,
+        )
+        async with self._lease(execution) as token:
+            return await store.resolve_effect(
+                execution.branch_id,
+                step_key(call_id),
+                decision,
+                workers_stopped=workers_stopped,
+                token=token,
+            )
 
     async def dispatch(
         self,

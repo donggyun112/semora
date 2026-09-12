@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
-from semora import AgentRuntime, ControlPlane, ExecutionContext, MemorySteps, MemoryTranscript
+from semora import (
+    AgentRuntime,
+    ControlPlane,
+    ExecutionContext,
+    MemorySteps,
+    MemoryTranscript,
+    RetryEffect,
+)
 from semora.controls import Continue, Ctx, Deny, Suspend, ToolDecision
 from semora_store import Indeterminate
 from test_recovery import Files, dead_workers_transcript, never_asked_twice
@@ -137,6 +144,33 @@ async def test_a_fork_inherits_the_sources_doubt_about_an_unreported_effect() ->
         "run-a", None, "run-f", agent, history=dead_workers_transcript()
     )
     assert files.ran == ["b.md"] and outcome.output == "both written"
+
+
+async def test_a_fork_does_not_inherit_the_sources_retry_authority() -> None:
+    """A provider decision names one branch; a fork carries doubt, not permission to repeat."""
+    store, files = MemorySteps(), Files()
+    await store.start("run-a", "tool:c1")
+    await store.finish_effect("run-a", "tool:c1", {"ok": True, "value": "wrote a.md"})
+    await store.start("run-a", "tool:c2")
+    running = await store.read("run-a", "tool:c2")
+    runtime = AgentRuntime(store)
+    await runtime.resolve_effect(
+        "run-a",
+        "c2",
+        RetryEffect(
+            decision_id="source-only",
+            expected_version=running.version,
+            reason="provider checked the source branch",
+        ),
+        workers_stopped=True,
+    )
+    agent, _ = never_asked_twice()
+    agent.tool_plain(files.write)
+
+    with pytest.raises(Indeterminate):
+        await runtime.fork("run-a", None, "run-b", agent, history=dead_workers_transcript())
+
+    assert files.ran == []
 
 
 async def test_a_fork_before_the_round_runs_it_again_as_the_branch() -> None:

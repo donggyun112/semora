@@ -13,7 +13,16 @@ from semora_store import (
     MemoryTranscript,
 )
 
-from .contracts import AgentSuspended, ControlSignal, PendingInput, StopReason, Suspended
+from .contracts import (
+    AgentSuspended,
+    ConfirmedEffect,
+    ControlSignal,
+    PendingInput,
+    RetryEffect,
+    StopReason,
+    Suspended,
+    UnresolvedEffect,
+)
 from .controls import (
     Continue,
     ControlPlane,
@@ -45,6 +54,7 @@ __all__ = [
     "AgentRuntime",
     "AgentSuspended",
     "Answer",
+    "ConfirmedEffect",
     "Contended",
     "Continue",
     "ControlPlane",
@@ -71,11 +81,13 @@ __all__ = [
     "Prompt",
     "Recover",
     "ResumeInput",
+    "RetryEffect",
     "Steering",
     "StopReason",
     "Suspend",
     "Suspended",
     "Suspending",
+    "UnresolvedEffect",
     "__version__",
     "gate",
     "new_branch_id",

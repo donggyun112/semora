@@ -40,6 +40,7 @@ from psycopg_pool import AsyncConnectionPool
 from semora_store import (
     EffectCompletion,
     EffectConflict,
+    EffectResolution,
     ExecutionContext,
     ExecutionStore,
     ExecutionTransition,
@@ -109,7 +110,9 @@ async def steps(request: pytest.FixtureRequest) -> AsyncIterator[StepLog]:
     if not DSN:
         pytest.skip("set SEMORA_TEST_DSN to run the durable half of this suite")
     async for durable in _postgres(
-        SCHEMA, "ledger_step, ledger_branch_lease, ledger_input", PostgresSteps
+        SCHEMA,
+        "ledger_effect_decision, ledger_step, ledger_branch_lease, ledger_input",
+        PostgresSteps,
     ):
         yield durable
 
@@ -194,6 +197,77 @@ async def test_repeating_the_same_completion_is_idempotent(steps: StepLog) -> No
     await steps.finish_effect("run-1", "meds", result)
 
     assert (await steps.read("run-1", "meds")).value == result
+
+
+async def test_a_confirmed_indeterminate_effect_commits_the_external_result_once(
+    steps: StepLog,
+) -> None:
+    await steps.start("run-1", "meds")
+    running = await steps.read("run-1", "meds")
+    decision = EffectResolution(
+        "complete",
+        "provider-receipt-1",
+        running.version,
+        "provider returned receipt 42",
+        {"dispensed": True},
+        "provider-key-1",
+    )
+
+    completed = await steps.resolve_effect("run-1", "meds", decision, workers_stopped=True)
+    replayed = await steps.resolve_effect("run-1", "meds", decision, workers_stopped=True)
+
+    assert completed.status == "done"
+    assert completed.value == {"dispensed": True}
+    assert completed.version > running.version
+    assert replayed == completed
+
+
+async def test_a_retry_decision_grants_exactly_one_new_attempt(steps: StepLog) -> None:
+    await steps.start("run-1", "meds")
+    running = await steps.read("run-1", "meds")
+    decision = EffectResolution(
+        "retry", "provider-absent-1", running.version, "provider confirms no request"
+    )
+
+    ready = await steps.resolve_effect("run-1", "meds", decision, workers_stopped=True)
+    assert ready.status == "ready"
+    assert await steps.start("run-1", "meds") is True
+    retried = await steps.read("run-1", "meds")
+
+    replayed = await steps.resolve_effect("run-1", "meds", decision, workers_stopped=True)
+
+    assert retried.status == "running"
+    assert replayed == retried
+    assert await steps.start("run-1", "meds") is False
+
+
+async def test_effect_resolution_rejects_stale_or_reused_authority(steps: StepLog) -> None:
+    await steps.start("run-1", "meds")
+    running = await steps.read("run-1", "meds")
+
+    with pytest.raises(ValueError, match="old workers"):
+        await steps.resolve_effect(
+            "run-1",
+            "meds",
+            EffectResolution("retry", "unsafe", running.version, "not enough"),
+            workers_stopped=False,
+        )
+    with pytest.raises(EffectConflict, match="stale version"):
+        await steps.resolve_effect(
+            "run-1",
+            "meds",
+            EffectResolution("retry", "stale", running.version + 1, "stale observer"),
+            workers_stopped=True,
+        )
+    first = EffectResolution("retry", "decision-1", running.version, "provider absent")
+    await steps.resolve_effect("run-1", "meds", first, workers_stopped=True)
+    with pytest.raises(EffectConflict, match="decision id"):
+        await steps.resolve_effect(
+            "run-1",
+            "meds",
+            EffectResolution("retry", "decision-1", running.version, "different evidence"),
+            workers_stopped=True,
+        )
 
 
 async def test_an_effect_cannot_finish_without_recorded_intent(steps: StepLog) -> None:

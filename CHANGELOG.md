@@ -3,6 +3,17 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
+## Unreleased
+
+- Indeterminate tool effects now have a first-class reconciliation path. `unresolved_effects()`
+  returns the call and its durable version; `resolve_effect()` atomically records either a
+  provider-confirmed result (`ConfirmedEffect`) or one effect-scoped retry grant (`RetryEffect`).
+  Decisions are idempotent by `decision_id`, stale versions conflict, and callers must explicitly
+  assert that old workers and outstanding provider requests were reconciled.
+- Store steps now expose a monotonic `version` and the transient `ready` state. Forks preserve
+  completed facts and unresolved doubt but deliberately do not transfer a source branch's retry
+  authority to the target branch.
+
 ## 0.6.0 — 2026-09-07
 
 - **Pydantic AI's agent interface is now the only agent interface.** `semora.Agent`, `semora.tool`,

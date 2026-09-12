@@ -1,6 +1,7 @@
 """Define the durable step ledger and its in-memory implementation.
 
-The ledger records opaque step values and distinguishes absent, running, and completed steps.
+The ledger records opaque step values and distinguishes absent, retry-ready, running, and
+completed steps.
 It surfaces ambiguous interrupted effects instead of claiming exactly-once execution.
 """
 
@@ -17,6 +18,7 @@ __all__ = [
     "ConversationScopedSteps",
     "EffectCompletion",
     "EffectConflict",
+    "EffectResolution",
     "ExecutionStore",
     "ExecutionTransition",
     "Fenced",
@@ -53,11 +55,12 @@ class Contended(Exception):
 class Indeterminate(Exception):
     """Report a step whose external effect may have occurred."""
 
-    def __init__(self, branch_id: str, step: str) -> None:
+    def __init__(self, branch_id: str, step: str, version: int = 0) -> None:
         """Initialize the error for the interrupted step."""
         super().__init__(f"step {step!r} of branch {branch_id!r} may or may not have happened")
         self.branch_id = branch_id
         self.step = step
+        self.version = version
 
 
 class EffectConflict(Exception):
@@ -74,8 +77,21 @@ class EffectConflict(Exception):
 class Step(NamedTuple):
     """Represent the persisted state and value of one step."""
 
-    status: Literal["absent", "running", "done"]
+    status: Literal["absent", "ready", "running", "done"]
     value: Any = None
+    version: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class EffectResolution:
+    """A trusted, version-bound decision about one unfinished effect."""
+
+    action: Literal["complete", "retry"]
+    decision_id: str
+    expected_version: int
+    reason: str
+    value: Any = None
+    provider_key: str | None = None
 
 
 class InputRecord(NamedTuple):
@@ -134,6 +150,18 @@ class ExecutionStore(ScopedStore, Protocol):
 
     async def finish_effect(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
         """Complete a running effect idempotently without replacing a committed result."""
+        ...
+
+    async def resolve_effect(
+        self,
+        branch_id: str,
+        key: str,
+        resolution: EffectResolution,
+        *,
+        workers_stopped: bool,
+        token: int = 0,
+    ) -> Step:
+        """Atomically apply or replay a trusted completion/retry decision."""
         ...
 
     async def write_control(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
@@ -231,6 +259,24 @@ class ConversationScopedSteps:
         """Complete a running effect idempotently without replacing a committed result."""
         await self._inner.finish_effect(self._filed(branch_id), key, value, token)
 
+    async def resolve_effect(
+        self,
+        branch_id: str,
+        key: str,
+        resolution: EffectResolution,
+        *,
+        workers_stopped: bool,
+        token: int = 0,
+    ) -> Step:
+        """Apply a trusted effect decision inside this conversation's scope."""
+        return await self._inner.resolve_effect(
+            self._filed(branch_id),
+            key,
+            resolution,
+            workers_stopped=workers_stopped,
+            token=token,
+        )
+
     async def write_control(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
         """Upsert mutable framework control state."""
         await self._inner.write_control(self._filed(branch_id), key, value, token)
@@ -291,6 +337,7 @@ class MemorySteps:
         self._tokens: dict[str, int] = {}
         self._inputs: dict[tuple[str, str], InputRecord] = {}
         self._input_sequence: dict[str, int] = {}
+        self._decisions: dict[tuple[str, str], dict[str, Any]] = {}
 
     def for_execution(self, context: ExecutionContext) -> ExecutionStore:
         """The whole store without a conversation; one conversation's view of it with."""
@@ -301,14 +348,15 @@ class MemorySteps:
     async def read(self, branch_id: str, key: str) -> Step:
         """Return the stored step or an absent state."""
         record = self._entries.get((branch_id, key), Step("absent"))
-        return Step(record.status, copy.deepcopy(record.value))
+        return Step(record.status, copy.deepcopy(record.value), record.version)
 
     async def start(self, branch_id: str, key: str, token: int = 0) -> bool:
         """Record running intent only when the step is absent."""
         self._fence(branch_id, token)
-        if (branch_id, key) in self._entries:
+        record = self._entries.get((branch_id, key), Step("absent"))
+        if record.status not in {"absent", "ready"}:
             return False
-        self._entries[branch_id, key] = Step("running")
+        self._entries[branch_id, key] = Step("running", None, record.version + 1)
         return True
 
     async def finish_effect(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
@@ -324,12 +372,44 @@ class MemorySteps:
         # Stored as a copy, the way a database would store it. The caller keeps mutating
         # the dict it handed in — a journal rewrites a tool result in place — and the
         # record's whole point is to still say what the tool returned.
-        self._entries[branch_id, key] = Step("done", copy.deepcopy(value))
+        self._entries[branch_id, key] = Step("done", copy.deepcopy(value), record.version + 1)
+
+    async def resolve_effect(
+        self,
+        branch_id: str,
+        key: str,
+        resolution: EffectResolution,
+        *,
+        workers_stopped: bool,
+        token: int = 0,
+    ) -> Step:
+        """Apply one externally reconciled decision without granting it twice."""
+        self._fence(branch_id, token)
+        payload = _resolution_payload(key, resolution, workers_stopped)
+        decision_key = (branch_id, resolution.decision_id)
+        previous = self._decisions.get(decision_key)
+        if previous is not None:
+            if previous != payload:
+                raise EffectConflict(
+                    branch_id, key, "decision id was used with different parameters"
+                )
+            return await self.read(branch_id, key)
+        record = self._entries.get((branch_id, key), Step("absent"))
+        if record.status != "running" or record.version != resolution.expected_version:
+            raise EffectConflict(branch_id, key, "stale version or effect is not unresolved")
+        if resolution.action == "complete":
+            updated = Step("done", copy.deepcopy(resolution.value), record.version + 1)
+        else:
+            updated = Step("ready", None, record.version + 1)
+        self._entries[branch_id, key] = updated
+        self._decisions[decision_key] = copy.deepcopy(payload)
+        return await self.read(branch_id, key)
 
     async def write_control(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
         """Upsert mutable process-local control state."""
         self._fence(branch_id, token)
-        self._entries[branch_id, key] = Step("done", copy.deepcopy(value))
+        record = self._entries.get((branch_id, key), Step("absent"))
+        self._entries[branch_id, key] = Step("done", copy.deepcopy(value), record.version + 1)
 
     async def finish(self, branch_id: str, key: str, value: Any, token: int = 0) -> None:
         """Compatibility alias for ``write_control``."""
@@ -338,8 +418,9 @@ class MemorySteps:
     async def forget(self, branch_id: str, key: str, token: int = 0) -> None:
         """Remove unfinished step intent while preserving completed results."""
         self._fence(branch_id, token)
-        if self._entries.get((branch_id, key), Step("absent")).status != "done":
-            self._entries.pop((branch_id, key), None)
+        record = self._entries.get((branch_id, key), Step("absent"))
+        if record.status == "running":
+            self._entries[branch_id, key] = Step("absent", None, record.version + 1)
 
     async def acquire(self, branch_id: str, owner: str, ttl_seconds: float = 60.0) -> int:
         """Acquire or renew a run lease using a monotonic TTL.
@@ -421,7 +502,7 @@ class MemorySteps:
     ) -> set[str]:
         """Atomically apply a process-local control transition."""
         self._fence(branch_id, token)
-        completed: list[tuple[str, Any]] = []
+        completed: list[tuple[str, Any, int]] = []
         seen: set[str] = set()
         for effect in transition.effects:
             if effect.key in seen:
@@ -440,7 +521,7 @@ class MemorySteps:
                     effect.key,
                     f"expected {effect.expected!r}, found {record.status!r}",
                 )
-            completed.append((effect.key, effect.value))
+            completed.append((effect.key, effect.value, record.version + 1))
         overlap = seen.intersection(transition.controls)
         if overlap:
             raise ValueError(
@@ -448,10 +529,11 @@ class MemorySteps:
             )
 
         inserted: set[str] = set()
-        for key, value in completed:
-            self._entries[branch_id, key] = Step("done", value)
+        for key, value, version in completed:
+            self._entries[branch_id, key] = Step("done", copy.deepcopy(value), version)
         for key, value in transition.controls.items():
-            self._entries[branch_id, key] = Step("done", value)
+            record = self._entries.get((branch_id, key), Step("absent"))
+            self._entries[branch_id, key] = Step("done", copy.deepcopy(value), record.version + 1)
         for input_id, value in transition.inputs:
             input_key = (branch_id, input_id)
             if input_key in self._inputs:
@@ -467,3 +549,35 @@ class MemorySteps:
         issued = self._tokens.get(branch_id, 0)
         if token and token < issued:
             raise Fenced(branch_id, token, issued)
+
+
+def _resolution_payload(
+    key: str, resolution: EffectResolution, workers_stopped: bool
+) -> dict[str, Any]:
+    """Validate and canonicalize a trusted resolution for idempotency checks."""
+    if workers_stopped is not True:
+        raise ValueError("confirm old workers and outstanding provider requests are reconciled")
+    if not isinstance(key, str) or not key.strip():
+        raise ValueError("effect key must be nonempty")
+    if not isinstance(resolution.decision_id, str) or not resolution.decision_id.strip():
+        raise ValueError("decision_id must be nonempty")
+    if type(resolution.expected_version) is not int or resolution.expected_version < 1:
+        raise ValueError("expected_version must be positive")
+    if not isinstance(resolution.reason, str) or not resolution.reason.strip():
+        raise ValueError("reason must be nonempty")
+    if resolution.action not in {"complete", "retry"}:
+        raise ValueError("action must be 'complete' or 'retry'")
+    if resolution.action == "retry" and resolution.value is not None:
+        raise ValueError("retry decisions cannot provide a completed value")
+    if resolution.provider_key is not None and (
+        not isinstance(resolution.provider_key, str) or not resolution.provider_key.strip()
+    ):
+        raise ValueError("provider_key must be nonempty when provided")
+    return {
+        "key": key,
+        "action": resolution.action,
+        "expected_version": resolution.expected_version,
+        "reason": resolution.reason,
+        "value": copy.deepcopy(resolution.value),
+        "provider_key": resolution.provider_key,
+    }

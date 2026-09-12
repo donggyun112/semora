@@ -21,7 +21,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import ToolDefinition
-from semora import AgentRuntime, ControlPlane
+from semora import AgentRuntime, ConfirmedEffect, ControlPlane, RetryEffect
 from semora.controls import Continue, Ctx, Suspend, ToolDecision
 from semora_store import Indeterminate, MemorySteps
 
@@ -168,6 +168,65 @@ async def test_started_but_unreported_call_is_indeterminate() -> None:
         "run-5", agent, dead_workers_transcript()
     )
     assert files.ran == ["b.md"], "only the caller may say the effect is safe to repeat"
+    assert outcome.output == "both written"
+
+
+async def test_provider_confirmation_becomes_the_replayed_tool_result() -> None:
+    store, files = MemorySteps(), Files()
+    agent, consulted = never_asked_twice()
+    agent.tool_plain(files.write)
+    await store.start("confirmed", "tool:c1")
+    await store.finish_effect("confirmed", "tool:c1", {"ok": True, "value": "wrote a.md"})
+    await store.start("confirmed", "tool:c2")
+    runtime = AgentRuntime(store)
+
+    with pytest.raises(Indeterminate) as uncertain:
+        await runtime.recover("confirmed", agent, dead_workers_transcript())
+
+    assert uncertain.value.version > 0
+    assert await runtime.unresolved_effects("confirmed") == [
+        ("c2", "write", {"path": "b.md", "text": "two"}, uncertain.value.version)
+    ]
+    decision = ConfirmedEffect(
+        decision_id="receipt-42",
+        expected_version=uncertain.value.version,
+        reason="provider returned receipt 42",
+        result="wrote b.md",
+        provider_key="send-b-1",
+    )
+    completed = await runtime.resolve_effect("confirmed", "c2", decision, workers_stopped=True)
+    replayed = await runtime.resolve_effect("confirmed", "c2", decision, workers_stopped=True)
+    outcome = await runtime.recover("confirmed", agent, dead_workers_transcript())
+
+    assert completed == replayed
+    assert files.ran == []
+    assert outcome.output == "both written"
+    assert consulted == [3]
+
+
+async def test_provider_absence_grants_only_the_named_effect_one_retry() -> None:
+    store, files = MemorySteps(), Files()
+    agent, _ = never_asked_twice()
+    agent.tool_plain(files.write)
+    await store.start("retry-one", "tool:c1")
+    await store.finish_effect("retry-one", "tool:c1", {"ok": True, "value": "wrote a.md"})
+    await store.start("retry-one", "tool:c2")
+    runtime = AgentRuntime(store)
+
+    with pytest.raises(Indeterminate) as uncertain:
+        await runtime.recover("retry-one", agent, dead_workers_transcript())
+    decision = RetryEffect(
+        decision_id="verified-absent-c2",
+        expected_version=uncertain.value.version,
+        reason="provider confirms no request was accepted",
+    )
+    ready = await runtime.resolve_effect("retry-one", "c2", decision, workers_stopped=True)
+    outcome = await runtime.recover("retry-one", agent, dead_workers_transcript())
+    replay = await runtime.resolve_effect("retry-one", "c2", decision, workers_stopped=True)
+
+    assert ready.status == "ready"
+    assert replay.status == "done", "decision replay must not grant another attempt"
+    assert files.ran == ["b.md"]
     assert outcome.output == "both written"
 
 

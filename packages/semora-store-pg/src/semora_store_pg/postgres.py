@@ -9,6 +9,7 @@ from psycopg_pool import AsyncConnectionPool
 from semora_store import (
     ConversationScopedSteps,
     EffectConflict,
+    EffectResolution,
     ExecutionContext,
     ExecutionStore,
     ExecutionTransition,
@@ -16,6 +17,7 @@ from semora_store import (
     InputRecord,
     Step,
 )
+from semora_store.ledger import _resolution_payload
 
 __all__ = ["SCHEMA", "PostgresSteps"]
 
@@ -29,6 +31,20 @@ create table if not exists ledger_step (
     started_at  timestamptz not null default now(),
     finished_at timestamptz,
     primary key (branch_id, key)
+);
+
+alter table ledger_step add column if not exists version bigint not null default 1;
+alter table ledger_step drop constraint if exists ledger_step_status_check;
+alter table ledger_step add constraint ledger_step_status_check
+    check (status in ('absent', 'ready', 'running', 'done'));
+
+create table if not exists ledger_effect_decision (
+    branch_id   text        not null,
+    decision_id text        not null,
+    key         text        not null,
+    payload     jsonb       not null,
+    created_at  timestamptz not null default now(),
+    primary key (branch_id, decision_id)
 );
 
 create table if not exists ledger_branch_lease (
@@ -60,7 +76,7 @@ create index if not exists ledger_input_pending
 create index if not exists ledger_step_running
     on ledger_step (started_at) where status = 'running';
 """
-"""The three tables. The partial indexes serve recovery and operator stuck-work queries."""
+"""The ledger tables. The partial indexes serve recovery and operator stuck-work queries."""
 
 
 class PostgresSteps:
@@ -87,15 +103,15 @@ class PostgresSteps:
             connection.cursor(row_factory=dict_row) as cursor,
         ):
             await cursor.execute(
-                "select status, value from ledger_step where branch_id = %s and key = %s",
+                "select status, value, version from ledger_step where branch_id = %s and key = %s",
                 (branch_id, key),
             )
             row = await cursor.fetchone()
         if row is None:
             return Step("absent")
-        if row["status"] == "running":
-            return Step("running")
-        return Step("done", row["value"])
+        if row["status"] in {"absent", "ready", "running"}:
+            return Step(row["status"], None, int(row["version"]))
+        return Step("done", row["value"], int(row["version"]))
 
     async def start(self, branch_id: str, key: str, token: int = 0) -> bool:
         """Atomically record new running intent after validating the fencing token."""
@@ -106,7 +122,10 @@ class PostgresSteps:
                     """
                 insert into ledger_step (branch_id, key, status)
                 values (%s, %s, 'running')
-                on conflict (branch_id, key) do nothing
+                on conflict (branch_id, key) do update
+                    set status = 'running', value = null, version = ledger_step.version + 1,
+                        started_at = now(), finished_at = null
+                    where ledger_step.status in ('absent', 'ready')
                 returning 1
                 """,
                     (branch_id, key),
@@ -118,6 +137,59 @@ class PostgresSteps:
         async with self._pool.connection() as connection:
             await self._fence(connection, branch_id, token)
             await self._complete_effect(connection, branch_id, key, value, "running")
+
+    async def resolve_effect(
+        self,
+        branch_id: str,
+        key: str,
+        resolution: EffectResolution,
+        *,
+        workers_stopped: bool,
+        token: int = 0,
+    ) -> Step:
+        """Apply one version-bound external reconciliation decision atomically."""
+        payload = _resolution_payload(key, resolution, workers_stopped)
+        async with self._pool.connection() as connection:
+            await self._fence(connection, branch_id, token)
+            async with connection.cursor(row_factory=dict_row) as cursor:
+                await cursor.execute(
+                    "select status, value, version from ledger_step"
+                    " where branch_id = %s and key = %s for update",
+                    (branch_id, key),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    raise EffectConflict(branch_id, key, "unknown effect")
+                await cursor.execute(
+                    "select key, payload from ledger_effect_decision"
+                    " where branch_id = %s and decision_id = %s",
+                    (branch_id, resolution.decision_id),
+                )
+                previous = await cursor.fetchone()
+                if previous is not None:
+                    if previous["key"] != key or previous["payload"] != payload:
+                        raise EffectConflict(
+                            branch_id, key, "decision id was used with different parameters"
+                        )
+                    return Step(row["status"], row["value"], int(row["version"]))
+                if row["status"] != "running" or row["version"] != resolution.expected_version:
+                    raise EffectConflict(
+                        branch_id, key, "stale version or effect is not unresolved"
+                    )
+                status: Any = "done" if resolution.action == "complete" else "ready"
+                value = resolution.value if resolution.action == "complete" else None
+                await cursor.execute(
+                    "update ledger_step set status = %s, value = %s, version = version + 1,"
+                    " finished_at = case when %s = 'done' then now() else null end"
+                    " where branch_id = %s and key = %s",
+                    (status, Jsonb(value), status, branch_id, key),
+                )
+                await cursor.execute(
+                    "insert into ledger_effect_decision(branch_id, decision_id, key, payload)"
+                    " values (%s, %s, %s, %s)",
+                    (branch_id, resolution.decision_id, key, Jsonb(payload)),
+                )
+                return Step(status, value, int(row["version"]) + 1)
 
     async def _complete_effect(
         self,
@@ -134,7 +206,10 @@ class PostgresSteps:
                     """
                     insert into ledger_step (branch_id, key, status, value, finished_at)
                     values (%s, %s, 'done', %s, now())
-                    on conflict (branch_id, key) do nothing
+                    on conflict (branch_id, key) do update
+                        set status = 'done', value = excluded.value, finished_at = now(),
+                            version = ledger_step.version + 1
+                        where ledger_step.status = 'absent'
                     returning 1
                     """,
                     (branch_id, key, Jsonb(value)),
@@ -143,7 +218,7 @@ class PostgresSteps:
                 await cursor.execute(
                     """
                     update ledger_step
-                    set status = 'done', value = %s, finished_at = now()
+                    set status = 'done', value = %s, finished_at = now(), version = version + 1
                     where branch_id = %s and key = %s and status = 'running'
                     returning 1
                     """,
@@ -173,7 +248,8 @@ class PostgresSteps:
                 insert into ledger_step (branch_id, key, status, value, finished_at)
                 values (%s, %s, 'done', %s, now())
                 on conflict (branch_id, key) do update
-                    set status = 'done', value = excluded.value, finished_at = now()
+                    set status = 'done', value = excluded.value, finished_at = now(),
+                        version = ledger_step.version + 1
                 """,
                     (branch_id, key, Jsonb(value)),
                 )
@@ -201,7 +277,8 @@ class PostgresSteps:
             await self._fence(connection, branch_id, token)
             async with connection.cursor() as cursor:
                 await cursor.execute(
-                    "delete from ledger_step"
+                    "update ledger_step set status = 'absent', value = null,"
+                    " version = version + 1, finished_at = null"
                     " where branch_id = %s and key = %s and status = 'running'",
                     (branch_id, key),
                 )
@@ -360,7 +437,8 @@ class PostgresSteps:
                         insert into ledger_step (branch_id, key, status, value, finished_at)
                         values (%s, %s, 'done', %s, now())
                         on conflict (branch_id, key) do update
-                            set status = 'done', value = excluded.value, finished_at = now()
+                            set status = 'done', value = excluded.value, finished_at = now(),
+                                version = ledger_step.version + 1
                         """,
                         (branch_id, key, Jsonb(value)),
                     )
