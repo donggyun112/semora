@@ -3,7 +3,7 @@
 Only what changes for a caller: behaviour, and names that were exported. Internal refactors and
 documentation corrections belong in the commit log, not here.
 
-## Unreleased
+## 0.7.0 — 2026-09-13
 
 - Indeterminate tool effects now have a first-class reconciliation path. `unresolved_effects()`
   returns the call and its durable version; `resolve_effect()` atomically records either a
