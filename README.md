@@ -2,6 +2,8 @@
 
 Fail-closed effect recovery and worker coordination for **Pydantic AI agents**.
 
+**Live demo:** [Semora operator console](https://semora-console-t3tqtorala-as.a.run.app/) ([source](https://github.com/donggyun112/semora-console))
+
 Pydantic AI owns the agent loop, messages, models, tools, deferred calls, and general lifecycle hooks. Semora adds a result-bearing effect ledger, worker leases and fencing, durable approval suspension, and policy revalidation on resume. Applications use Pydantic AI's `Agent` directly.
 
 **Why not durable execution alone?** Pydantic AI and Harness already provide durable backends, snapshots, deferred tools, hooks, and guardrails. Semora keeps the narrower contract they do not enforce: a tool call that started and never committed its result stays `Indeterminate` until the caller says a retry is safe, and a person's approval is input to a fresh policy decision. Pydantic durability capabilities can run beside Semora's outermost execution boundary.
@@ -62,7 +64,7 @@ Suspensions persist the complete native `DeferredToolRequests` value. Resume use
 `build_results()` validation and still reads the earlier 0.5.x continuation shape during rolling
 upgrades. See [Pydantic-native architecture](docs/PYDANTIC-NATIVE-SEMORA.md).
 
-The [operator console](https://github.com/donggyun112/semora-console) demonstrates policy composition, request-scoped payment deduplication, indeterminate effects, approvals and policy forks. Its payment is a simulated effect; the demonstration does not certify any external payment provider.
+The [live operator console](https://semora-console-t3tqtorala-as.a.run.app/) ([source](https://github.com/donggyun112/semora-console)) demonstrates policy composition, request-scoped payment deduplication, indeterminate effects, approvals and policy forks. Its payment is a simulated effect; the demonstration does not certify any external payment provider.
 
 ## Packages
 
